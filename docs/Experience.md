@@ -24,6 +24,21 @@
 
 ---
 
+## 2026-05-29
+
+### 新密钥格式迁移（sg_step_/sg_final_ 前缀 → 纯 6 位 [A-Z0-9]{6}）
+- **事件**：将 step key 和 final key 从 `sg_step_<64 hex>` 格式改为 6 位大写字母+数字 code
+- **经验**：key 格式变更时，需注意区分两类测试断言：(1) 格式断言（regex 匹配 "key 长什么样"）— 必须同步更新；(2) 测试数据字符串（mock key 用于验证 checker logic）— 格式无关，因为 `validateCheckpoint` 只比 hash，不关心 plaintext 格式。但为代码可读性，mock key 也应更新为新格式避免后来者困惑
+- **影响范围**：keys.ts 是唯一生成者；gate.ts 只调 generate/hash，不关心格式；测试文件的 key 校验 regex 需全面更新
+- **踩坑人**：Code Agent (2026-05-29 Wave)
+
+### gate_active_task — Stop Hook 集成点
+- **事件**：新增 `gate_active_task` MCP Tool，供 Stop Hook 判断是否有进行中的 step-gated 任务
+- **经验**：该 Tool 无参数、无副作用，仅读取。Stop Hook 的典型用法：
+  1. 调用 `gate_active_task` → `hasActiveTask: false` → 不需要 gate_finalize，普通退出
+  2. `hasActiveTask: true` → 读取 `taskId` → 再调用 `gate_current` 获取完整状态 → 决定是否需要 finalize
+- **踩坑人**：Code Agent (2026-05-29 Wave)
+
 ## 通用 / 架构
 
 ### better-sqlite3 SELECT * 返回蛇形列名，必须手动映射驼峰 (2026-05-28)

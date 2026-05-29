@@ -277,6 +277,15 @@ export function verifyFinalKey(taskId: string, keyPlaintext: string): boolean {
   }
 }
 
+export function getActiveTask(): TaskRow | undefined {
+  try {
+    const row = db.prepare("SELECT * FROM tasks WHERE status = 'active' LIMIT 1").get() as Record<string, unknown> | undefined;
+    return row ? mapTaskRow(row) : undefined;
+  } catch (err) {
+    throw new GateError(GateErrorCode.INTERNAL_ERROR, `Failed to get active task: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 export function addEvent(
   taskId: string,
   stepId: string | null,

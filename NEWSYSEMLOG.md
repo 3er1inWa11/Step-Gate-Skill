@@ -197,3 +197,37 @@
 - 使用 `beforeEach` 清理单例 SQLite 数据库，每个测试使用唯一 `randomUUID()` taskId
 - 辅助函数 `simulateStartPlan()` 封装 `flattenPlan` + `generateStepKey` + `createTask` 流程
 - **测试**：76/76 通过（30 core + 24 storage + 22 tools）
+
+---
+
+### Feature — 新密钥格式 + gate_active_task + 集成测试更新 (2026-05-29)
+
+**改动 1 — 新密钥格式**
+- `src/core/keys.ts`：将 `sg_step_<64 hex>` / `sg_final_<64 hex>` 格式改为纯 6 位大写字母+数字 (`[A-Z0-9]{6}`)
+- 示例格式：`A3K9X2`、`Z7MPQ1`
+- 新增 `CHARSET` 常量和 `randomCode(length)` 内部辅助函数
+- `hashKey` 导出不变，SHA-256 hash 不变
+- `generateStepKey` / `generateFinalKey` 签名不变，仅 plaintext 格式变化
+
+**改动 2 — repository 加 `getActiveTask`**
+- `src/storage/repository.ts`：新增 `getActiveTask()` 函数，查询 `status = 'active'` 的第一个 task
+- 用于 Stop Hook 快速判断是否有进行中的 step-gated 任务
+
+**改动 3 — 新 MCP Tool `gate_active_task`**
+- 创建 `src/tools/activeTask.ts`：`gate_active_task` MCP Tool
+- 无参数，调用 `getActiveTask()` + `getCurrentStep(taskId)` 返回 `{ hasActiveTask, taskId?, currentStep? }`
+- Stop Hook 以此判断是否需要调用 `gate_finalize`
+
+**改动 4 — Tool 注册**
+- `src/tools/index.ts`：新增 `registerActiveTask` 导出
+- `src/index.ts`：导入并注册 `registerActiveTask(server)`
+
+**改动 5 — 测试更新**
+- 所有测试文件（core / storage / tools / ci-blackbox）中的 key 格式断言从 `sg_step_`/`sg_final_` 改为 `[A-Z0-9]{6}`
+- CI 黑盒测试中 mock 错误 key 从 72 字符前缀格式改为 6 字符 `'BADKEY'`
+- CI 工具列表测试从 4 工具更新为 5 工具（含 `gate_active_task`）
+- 测试描述文字同步更新
+
+**验证**
+- `npx tsc --noEmit`：零错误
+- `npx vitest run`：91/91 全部通过（30 core + 24 storage + 22 tools + 15 CI blackbox）

@@ -31,7 +31,7 @@ describe('keys', () => {
   describe('generateStepKey', () => {
     it('returns plaintext and hash', () => {
       const { plaintext, hash } = generateStepKey();
-      expect(plaintext).toMatch(/^sg_step_[a-f0-9]{64}$/);
+      expect(plaintext).toMatch(/^[A-Z0-9]{6}$/);
       expect(hash).toHaveLength(64);
     });
 
@@ -49,9 +49,9 @@ describe('keys', () => {
   });
 
   describe('generateFinalKey', () => {
-    it('returns plaintext and hash with sg_final_ prefix', () => {
+    it('returns plaintext and hash as 6-char uppercase alphanumeric', () => {
       const { plaintext, hash } = generateFinalKey();
-      expect(plaintext).toMatch(/^sg_final_[a-f0-9]{64}$/);
+      expect(plaintext).toMatch(/^[A-Z0-9]{6}$/);
       expect(hash).toHaveLength(64);
     });
 
@@ -67,11 +67,11 @@ describe('keys', () => {
     });
   });
 
-  it('step keys and final keys use different prefixes', () => {
+  it('step keys and final keys are 6-char uppercase alphanumeric codes', () => {
     const step = generateStepKey();
     const final = generateFinalKey();
-    expect(step.plaintext.startsWith('sg_step_')).toBe(true);
-    expect(final.plaintext.startsWith('sg_final_')).toBe(true);
+    expect(step.plaintext).toMatch(/^[A-Z0-9]{6}$/);
+    expect(final.plaintext).toMatch(/^[A-Z0-9]{6}$/);
   });
 });
 
@@ -265,7 +265,7 @@ function makeStep(overrides: Partial<StepRow> = {}): StepRow {
 
 describe('validateCheckpoint', () => {
   it('returns task and currentStep on successful validation', () => {
-    const stepKey = 'sg_step_aaaa';
+    const stepKey = 'A3K9X2';
     const keyHash = hashKey(stepKey);
     const step = makeStep({ stepKeyHash: keyHash });
     const task = makeTask();
@@ -372,7 +372,7 @@ describe('validateCheckpoint', () => {
   });
 
   it('throws INVALID_STEP_KEY when step key hash does not match', () => {
-    const stepKey = 'sg_step_real';
+    const stepKey = 'Z7MPQ1';
     const keyHash = hashKey(stepKey);
     const step = makeStep({ stepKeyHash: keyHash });
     const task = makeTask();
@@ -387,7 +387,7 @@ describe('validateCheckpoint', () => {
 
     let error: unknown = null;
     try {
-      validateCheckpoint(repo, task.id, step.id, 'sg_step_wrong_key');
+      validateCheckpoint(repo, task.id, step.id, 'WRONG1');
     } catch (e) {
       error = e;
     }
@@ -425,7 +425,7 @@ describe('advanceStep', () => {
     expect(result.nextStep!.index).toBe(2);
     expect(result.nextStep!.total).toBe(3);
     expect(result.nextStepKey).toBeDefined();
-    expect(result.nextStepKey).toMatch(/^sg_step_/);
+    expect(result.nextStepKey).toMatch(/^[A-Z0-9]{6}$/);
     expect(result.allStepsCompleted).toBeUndefined();
     expect(result.finalKey).toBeUndefined();
   });
@@ -451,7 +451,7 @@ describe('advanceStep', () => {
     expect(repo.completeAndAdvance).toHaveBeenCalledWith('step-2', null, null, 'task-1', expect.any(String));
     expect(result.allStepsCompleted).toBe(true);
     expect(result.finalKey).toBeDefined();
-    expect(result.finalKey).toMatch(/^sg_final_/);
+    expect(result.finalKey).toMatch(/^[A-Z0-9]{6}$/);
     expect(result.nextStep).toBeUndefined();
     expect(result.nextStepKey).toBeUndefined();
   });

@@ -277,13 +277,14 @@ describe('CI Black-Box: MCP Protocol Level', () => {
   // 0. Server liveness -- tools/list
   // ═════════════════════════════════════════════════════════════════════
 
-  it('0. tools/list 返回 4 个 MVP 工具', async () => {
+  it('0. tools/list 返回 5 个工具 (含 gate_active_task)', async () => {
     const result = await client.request('tools/list');
     expect(result).toBeDefined();
     expect(Array.isArray(result.tools)).toBe(true);
 
     const names: string[] = result.tools.map((t: any) => t.name).sort();
     expect(names).toEqual([
+      'gate_active_task',
       'gate_checkpoint',
       'gate_current',
       'gate_finalize',
@@ -325,7 +326,7 @@ describe('CI Black-Box: MCP Protocol Level', () => {
     // Step key
     expect(result.stepKey).toBeDefined();
     expect(typeof result.stepKey).toBe('string');
-    expect(result.stepKey as string).toMatch(/^sg_step_[a-f0-9]{64}$/);
+    expect(result.stepKey as string).toMatch(/^[A-Z0-9]{6}$/);
     stepKey1 = result.stepKey as string;
   });
 
@@ -374,7 +375,7 @@ describe('CI Black-Box: MCP Protocol Level', () => {
     // Next key must differ
     expect(result.nextStepKey).toBeDefined();
     expect(typeof result.nextStepKey).toBe('string');
-    expect(result.nextStepKey as string).toMatch(/^sg_step_[a-f0-9]{64}$/);
+    expect(result.nextStepKey as string).toMatch(/^[A-Z0-9]{6}$/);
     expect(result.nextStepKey).not.toBe(stepKey1);
     stepKey2 = result.nextStepKey as string;
   });
@@ -433,7 +434,7 @@ describe('CI Black-Box: MCP Protocol Level', () => {
 
     // mid.nextStepKey is the key for step 3 (final)
     const stepKey3 = mid.nextStepKey as string;
-    expect(stepKey3).toMatch(/^sg_step_[a-f0-9]{64}$/);
+    expect(stepKey3).toMatch(/^[A-Z0-9]{6}$/);
 
     // Query gate_current to get the UUID for the final step
     const current = await client.callTool('gate_current', { taskId: taskId });
@@ -456,7 +457,7 @@ describe('CI Black-Box: MCP Protocol Level', () => {
 
     expect(result.finalKey).toBeDefined();
     expect(typeof result.finalKey).toBe('string');
-    expect(result.finalKey as string).toMatch(/^sg_final_[a-f0-9]{64}$/);
+    expect(result.finalKey as string).toMatch(/^[A-Z0-9]{6}$/);
     finalKey = result.finalKey as string;
   });
 
@@ -465,7 +466,7 @@ describe('CI Black-Box: MCP Protocol Level', () => {
   // ═════════════════════════════════════════════════════════════════════
 
   it('7. 用错误 finalKey finalize 失败', async () => {
-    const badKey = 'sg_final_' + '0'.repeat(64);
+    const badKey = 'BADKEY';
 
     const result = await client.callTool('gate_finalize', {
       taskId: taskId,
@@ -532,7 +533,7 @@ describe('CI Black-Box: MCP Protocol Level', () => {
     const result = await client.callTool('gate_checkpoint', {
       taskId: taskId,
       stepId: stepId1,
-      stepKey: 'sg_step_' + 'a'.repeat(64),
+      stepKey: 'BADKEY',
     });
 
     expect(result.accepted).toBe(false);
@@ -557,7 +558,7 @@ describe('CI Black-Box: MCP Protocol Level', () => {
   it('12. checkpoint 缺 task_id -> 错误', async () => {
     const result = await client.callTool('gate_checkpoint', {
       stepId: 'some-id',
-      stepKey: 'sg_step_' + 'b'.repeat(64),
+      stepKey: 'BADKEY',
     } as any);
 
     expect(result._isError).toBe(true);

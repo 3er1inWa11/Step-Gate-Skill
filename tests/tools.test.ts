@@ -117,7 +117,7 @@ describe('End-to-End: Simple Plan', () => {
     expect(a1.nextStep).toBeDefined();
     expect(a1.nextStep!.index).toBe(2);
     expect(a1.nextStepKey).toBeDefined();
-    expect(a1.nextStepKey).toMatch(/^sg_step_/);
+    expect(a1.nextStepKey).toMatch(/^[A-Z0-9]{6}$/);
 
     // 4. Checkpoint step 2
     const v2 = validateCheckpoint(repo, taskId, steps[1].id, a1.nextStepKey!);
@@ -134,7 +134,7 @@ describe('End-to-End: Simple Plan', () => {
     const a3 = advanceStep(repo, v3.task, v3.currentStep);
     expect(a3.allStepsCompleted).toBe(true);
     expect(a3.finalKey).toBeDefined();
-    expect(a3.finalKey).toMatch(/^sg_final_/);
+    expect(a3.finalKey).toMatch(/^[A-Z0-9]{6}$/);
 
     // 6. Verify final key (gate_finalize validation)
     const isValid = repo.verifyFinalKey(taskId, a3.finalKey!);
@@ -298,7 +298,7 @@ describe('Checkpoint Validation', () => {
     // Try with a completely made-up key
     let error: unknown = null;
     try {
-      validateCheckpoint(repo, taskId, steps[0].id, 'sg_step_badbadbad');
+      validateCheckpoint(repo, taskId, steps[0].id, 'BADKEY');
     } catch (e) {
       error = e;
     }
@@ -311,7 +311,7 @@ describe('Checkpoint Validation', () => {
 
     let error: unknown = null;
     try {
-      validateCheckpoint(repo, fakeId, 'step-any', 'sg_step_anything');
+      validateCheckpoint(repo, fakeId, 'step-any', 'BADKEY');
     } catch (e) {
       error = e;
     }
@@ -356,7 +356,7 @@ describe('Finalize Validation', () => {
     advanceStep(repo, v.task, v.currentStep);
 
     // Try verify with wrong key
-    const isValid = repo.verifyFinalKey(taskId, 'sg_final_wrong_key');
+    const isValid = repo.verifyFinalKey(taskId, 'BADKEY1');
     expect(isValid).toBe(false);
   });
 
@@ -369,7 +369,7 @@ describe('Finalize Validation', () => {
     simulateStartPlan(taskId, 'Premature Fin', nodes);
 
     // Haven't checkpointed anything — final_key_hash is still null
-    const isValid = repo.verifyFinalKey(taskId, 'sg_final_anything');
+    const isValid = repo.verifyFinalKey(taskId, 'BADKEY');
     expect(isValid).toBe(false);
 
     // Also verify: task should not show any final_key_hash
@@ -424,7 +424,7 @@ describe('Finalize Validation', () => {
     advanceStep(repo, v1.task, v1.currentStep);
 
     // Now try verifying a final key — should fail because not all steps completed (no final_key_hash)
-    const isValid = repo.verifyFinalKey(taskId, 'sg_final_whatever');
+    const isValid = repo.verifyFinalKey(taskId, 'BADKEY');
     expect(isValid).toBe(false);
 
     // Also: current step should be step 2
