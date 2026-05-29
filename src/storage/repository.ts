@@ -13,8 +13,6 @@ function now(): string {
 
 // ---------------------------------------------------------------------------
 // Snake_case → camelCase mappers for SELECT * results
-// better-sqlite3 returns column names as defined in the schema (snake_case),
-// but our TypeScript types use camelCase. These mappers bridge the gap.
 // ---------------------------------------------------------------------------
 
 function mapTaskRow(row: Record<string, unknown>): TaskRow {
@@ -38,6 +36,7 @@ function mapStepRow(row: Record<string, unknown>): StepRow {
     title: row.title as string,
     path: row.path as string,
     orderIndex: row.order_index as number,
+    dependsOn: row.depends_on ? (JSON.parse(row.depends_on as string) as string[]) : [],
     status: row.status as StepRow['status'],
     stepKeyHash: (row.step_key_hash as string) ?? null,
     completedAt: (row.completed_at as string) ?? null,
@@ -56,6 +55,10 @@ function mapEventRow(row: Record<string, unknown>): EventRow {
   };
 }
 
+// ---------------------------------------------------------------------------
+// createTask
+// ---------------------------------------------------------------------------
+
 export function createTask(task: TaskRow, steps: StepRow[]): void {
   if (!task || !task.id || !task.title) {
     throw new GateError(GateErrorCode.PLAN_SCHEMA_INVALID, 'Task must have id and title');
@@ -70,8 +73,8 @@ export function createTask(task: TaskRow, steps: StepRow[]): void {
   `);
 
   const insertStep = db.prepare(`
-    INSERT INTO steps (id, task_id, parent_path, title, path, order_index, status, step_key_hash, completed_at, created_at)
-    VALUES (@id, @taskId, @parentPath, @title, @path, @orderIndex, @status, @stepKeyHash, @completedAt, @createdAt)
+    INSERT INTO steps (id, task_id, parent_path, title, path, order_index, depends_on, status, step_key_hash, completed_at, created_at)
+    VALUES (@id, @taskId, @parentPath, @title, @path, @orderIndex, @dependsOn, @status, @stepKeyHash, @completedAt, @createdAt)
   `);
 
   const transaction = db.transaction(() => {
@@ -94,6 +97,7 @@ export function createTask(task: TaskRow, steps: StepRow[]): void {
         title: step.title,
         path: step.path,
         orderIndex: step.orderIndex,
+        dependsOn: JSON.stringify(step.dependsOn),
         status: step.status,
         stepKeyHash: step.stepKeyHash,
         completedAt: step.completedAt,
@@ -112,6 +116,10 @@ export function createTask(task: TaskRow, steps: StepRow[]): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// getTask
+// ---------------------------------------------------------------------------
+
 export function getTask(taskId: string): TaskRow | undefined {
   if (!taskId) {
     throw new GateError(GateErrorCode.TASK_NOT_FOUND, 'taskId is required');
@@ -127,22 +135,60 @@ export function getTask(taskId: string): TaskRow | undefined {
   }
 }
 
-export function getCurrentStep(taskId: string): StepRow | undefined {
+// ---------------------------------------------------------------------------
+// getCurrentSteps — returns ALL steps with status='current' (DAG support)
+// ---------------------------------------------------------------------------
+
+export function getCurrentSteps(taskId: string): StepRow[] {
   if (!taskId) {
     throw new GateError(GateErrorCode.TASK_NOT_FOUND, 'taskId is required');
   }
   try {
+    const rows = db
+      .prepare("SELECT * FROM steps WHERE task_id = ? AND status = 'current' ORDER BY order_index ASC")
+      .all(taskId) as Record<string, unknown>[];
+    return rows.map(mapStepRow);
+  } catch (err) {
+    throw new GateError(
+      GateErrorCode.INTERNAL_ERROR,
+      `Failed to get current steps: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// getCurrentStep — legacy single-step query (for backward compat)
+// ---------------------------------------------------------------------------
+
+export function getCurrentStep(taskId: string): StepRow | undefined {
+  const steps = getCurrentSteps(taskId);
+  return steps.length > 0 ? steps[0] : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// getStep
+// ---------------------------------------------------------------------------
+
+export function getStep(stepId: string): StepRow | undefined {
+  if (!stepId) {
+    return undefined;
+  }
+  try {
     const row = db
-      .prepare("SELECT * FROM steps WHERE task_id = ? AND status = 'current'")
-      .get(taskId) as Record<string, unknown> | undefined;
+      .prepare('SELECT * FROM steps WHERE id = ?')
+      .get(stepId) as Record<string, unknown> | undefined;
     return row ? mapStepRow(row) : undefined;
   } catch (err) {
     throw new GateError(
       GateErrorCode.INTERNAL_ERROR,
-      `Failed to get current step: ${err instanceof Error ? err.message : String(err)}`,
+      `Failed to get step: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// getTaskSteps
+// ---------------------------------------------------------------------------
 
 export function getTaskSteps(taskId: string): StepRow[] {
   if (!taskId) {
@@ -160,6 +206,10 @@ export function getTaskSteps(taskId: string): StepRow[] {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// completeStep (legacy, kept for test compat)
+// ---------------------------------------------------------------------------
 
 export function completeStep(stepId: string): void {
   if (!stepId) {
@@ -183,6 +233,10 @@ export function completeStep(stepId: string): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// setCurrentStep (legacy, kept for test compat)
+// ---------------------------------------------------------------------------
+
 export function setCurrentStep(stepId: string, keyHash: string): void {
   if (!stepId) {
     throw new GateError(GateErrorCode.INVALID_CURRENT_STEP, 'stepId is required');
@@ -202,6 +256,10 @@ export function setCurrentStep(stepId: string, keyHash: string): void {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// updateTaskStatus
+// ---------------------------------------------------------------------------
 
 export function updateTaskStatus(taskId: string, status: string): void {
   if (!taskId) {
@@ -223,6 +281,10 @@ export function updateTaskStatus(taskId: string, status: string): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// setFinalKeyHash (legacy, kept for test compat)
+// ---------------------------------------------------------------------------
+
 export function setFinalKeyHash(taskId: string, hash: string): void {
   if (!taskId) {
     throw new GateError(GateErrorCode.TASK_NOT_FOUND, 'taskId is required');
@@ -243,6 +305,10 @@ export function setFinalKeyHash(taskId: string, hash: string): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// verifyStepKey
+// ---------------------------------------------------------------------------
+
 export function verifyStepKey(
   taskId: string,
   stepId: string,
@@ -262,6 +328,10 @@ export function verifyStepKey(
   }
 }
 
+// ---------------------------------------------------------------------------
+// verifyFinalKey
+// ---------------------------------------------------------------------------
+
 export function verifyFinalKey(taskId: string, keyPlaintext: string): boolean {
   if (!taskId || !keyPlaintext) {
     return false;
@@ -277,14 +347,49 @@ export function verifyFinalKey(taskId: string, keyPlaintext: string): boolean {
   }
 }
 
+// ---------------------------------------------------------------------------
+// getActiveTasks — all tasks with status='active'
+// ---------------------------------------------------------------------------
+
+export function getActiveTasks(): TaskRow[] {
+  try {
+    const rows = db.prepare("SELECT * FROM tasks WHERE status = 'active'").all() as Record<string, unknown>[];
+    return rows.map(mapTaskRow);
+  } catch (err) {
+    throw new GateError(
+      GateErrorCode.INTERNAL_ERROR,
+      `Failed to get active tasks: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// getActiveTask — legacy single-task query (for backward compat)
+// ---------------------------------------------------------------------------
+
 export function getActiveTask(): TaskRow | undefined {
   try {
     const row = db.prepare("SELECT * FROM tasks WHERE status = 'active' LIMIT 1").get() as Record<string, unknown> | undefined;
     return row ? mapTaskRow(row) : undefined;
   } catch (err) {
-    throw new GateError(GateErrorCode.INTERNAL_ERROR, `Failed to get active task: ${err instanceof Error ? err.message : String(err)}`);
+    throw new GateError(
+      GateErrorCode.INTERNAL_ERROR,
+      `Failed to get active task: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
+
+// ---------------------------------------------------------------------------
+// cancelTask
+// ---------------------------------------------------------------------------
+
+export function cancelTask(taskId: string): void {
+  updateTaskStatus(taskId, 'cancelled');
+}
+
+// ---------------------------------------------------------------------------
+// addEvent
+// ---------------------------------------------------------------------------
 
 export function addEvent(
   taskId: string,
@@ -307,10 +412,14 @@ export function addEvent(
   }
 }
 
+// ---------------------------------------------------------------------------
+// completeAndAdvance — atomic completion + multi-step activation (DAG)
+// ---------------------------------------------------------------------------
+
 export function completeAndAdvance(
   completedStepId: string,
-  nextStepId: string | null,
-  nextKeyHash: string | null,
+  nextStepIds: string[],
+  nextKeyHashes: string[],
   taskId: string,
   finalKeyHash: string | null,
 ): void {
@@ -321,15 +430,17 @@ export function completeAndAdvance(
     db.prepare("INSERT INTO events (id, task_id, step_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(randomUUID(), taskId, completedStepId, 'step_completed', null, now());
 
-    if (nextStepId && nextKeyHash) {
-      // Has next step: activate it
-      db.prepare("UPDATE steps SET status = 'current', step_key_hash = ? WHERE id = ?")
-        .run(nextKeyHash, nextStepId);
-      db.prepare("INSERT INTO events (id, task_id, step_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(randomUUID(), taskId, nextStepId, 'step_activated', null, now());
-      // Update current_index
-      db.prepare('UPDATE tasks SET current_index = (SELECT order_index FROM steps WHERE id = ?), updated_at = ? WHERE id = ?')
-        .run(nextStepId, now(), taskId);
+    if (nextStepIds.length > 0) {
+      // Activate all unlocked next steps
+      for (let i = 0; i < nextStepIds.length; i++) {
+        db.prepare("UPDATE steps SET status = 'current', step_key_hash = ? WHERE id = ?")
+          .run(nextKeyHashes[i], nextStepIds[i]);
+        db.prepare("INSERT INTO events (id, task_id, step_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+          .run(randomUUID(), taskId, nextStepIds[i], 'step_activated', null, now());
+      }
+      // Update task timestamp
+      db.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?')
+        .run(now(), taskId);
     } else if (finalKeyHash) {
       // All completed: store final key hash
       db.prepare('UPDATE tasks SET final_key_hash = ?, updated_at = ? WHERE id = ?')
@@ -337,16 +448,23 @@ export function completeAndAdvance(
       db.prepare("INSERT INTO events (id, task_id, step_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)")
         .run(randomUUID(), taskId, null, 'all_steps_completed', null, now());
     }
+    // else: no next steps and no finalKeyHash → just complete, don't activate anything (parallel branch await)
   });
 
   try {
     transaction();
   } catch (err) {
     if (err instanceof GateError) throw err;
-    throw new GateError(GateErrorCode.INTERNAL_ERROR,
-      `Failed to advance step: ${err instanceof Error ? err.message : String(err)}`);
+    throw new GateError(
+      GateErrorCode.INTERNAL_ERROR,
+      `Failed to advance step: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
+
+// ---------------------------------------------------------------------------
+// getEvents
+// ---------------------------------------------------------------------------
 
 export function getEvents(taskId: string): EventRow[] {
   if (!taskId) {

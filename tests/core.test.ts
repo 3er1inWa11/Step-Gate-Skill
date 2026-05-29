@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { generateStepKey, generateFinalKey, hashKey } from '../src/core/keys.js';
 import { flattenPlan } from '../src/core/plan.js';
-import { validateCheckpoint, advanceStep } from '../src/core/gate.js';
+import { validateCheckpoint, advanceSteps } from '../src/core/gate.js';
 import { GateError, GateErrorCode } from '../src/core/errors.js';
 import type { GateRepository } from '../src/core/gate.js';
 import type { TaskRow, StepRow } from '../src/types/index.js';
@@ -110,7 +110,66 @@ describe('flattenPlan', () => {
     expect(result[2].orderIndex).toBe(3);
   });
 
-  it('handles a flat plan (no nesting)', () => {
+  it('auto-serializes: no id, no dependsOn — each depends on the previous', () => {
+    const nodes: PlanNode[] = [{ title: 'Step A' }, { title: 'Step B' }, { title: 'Step C' }];
+
+    const result = flattenPlan(nodes, 'task-serial');
+
+    expect(result).toHaveLength(3);
+    expect(result[0].id).toMatch(/_step_1$/);
+    expect(result[0].dependsOn).toEqual([]);
+    expect(result[1].id).toMatch(/_step_2$/);
+    expect(result[1].dependsOn).toEqual([result[0].id]);
+    expect(result[2].id).toMatch(/_step_3$/);
+    expect(result[2].dependsOn).toEqual([result[1].id]);
+  });
+
+  it('uses explicit id when provided', () => {
+    const nodes: PlanNode[] = [
+      { id: 'init', title: 'Initialize' },
+      { id: 'type', title: 'Types' },
+    ];
+
+    const result = flattenPlan(nodes, 'task-explicit');
+
+    expect(result[0].id).toBe('init');
+    expect(result[1].id).toBe('type');
+    // Auto-serial: type depends on init (no explicit dependsOn)
+    expect(result[1].dependsOn).toEqual(['init']);
+  });
+
+  it('respects explicit dependsOn over auto-serial', () => {
+    const nodes: PlanNode[] = [
+      { id: 'a', title: 'Step A' },
+      { id: 'b', title: 'Step B', dependsOn: ['a'] },
+      { id: 'c', title: 'Step C', dependsOn: ['b'] },
+    ];
+
+    const result = flattenPlan(nodes, 'task-deps');
+
+    expect(result[0].dependsOn).toEqual([]);
+    expect(result[1].dependsOn).toEqual(['a']);
+    expect(result[2].dependsOn).toEqual(['b']);
+  });
+
+  it('supports DAG with parallel branches', () => {
+    const nodes: PlanNode[] = [
+      { id: 'init', title: 'Init' },
+      { id: 'modA', title: 'Module A', dependsOn: ['init'] },
+      { id: 'modB', title: 'Module B', dependsOn: ['init'] },
+      { id: 'integrate', title: 'Integrate', dependsOn: ['modA', 'modB'] },
+    ];
+
+    const result = flattenPlan(nodes, 'task-dag');
+
+    expect(result).toHaveLength(4);
+    expect(result[0].dependsOn).toEqual([]);  // init: no deps
+    expect(result[1].dependsOn).toEqual(['init']); // modA
+    expect(result[2].dependsOn).toEqual(['init']); // modB
+    expect(result[3].dependsOn).toEqual(['modA', 'modB']); // integrate
+  });
+
+  it('handles flat plan (no nesting) with auto serial', () => {
     const nodes: PlanNode[] = [{ title: 'Step A' }, { title: 'Step B' }];
 
     const result = flattenPlan(nodes, 'task-2');
@@ -203,7 +262,7 @@ describe('flattenPlan', () => {
     it('throws PLAN_SCHEMA_INVALID when a node has no title', () => {
       const nodes: PlanNode[] = [
         { title: 'Good' },
-        { title: '' } as PlanNode, // empty string title
+        { title: '' } as PlanNode,
       ];
 
       expect(() => flattenPlan(nodes, 'task-9')).toThrow(GateError);
@@ -255,6 +314,7 @@ function makeStep(overrides: Partial<StepRow> = {}): StepRow {
     title: 'First Step',
     path: 'First Step',
     orderIndex: 1,
+    dependsOn: [],
     status: 'current',
     stepKeyHash: null,
     completedAt: null,
@@ -272,8 +332,9 @@ describe('validateCheckpoint', () => {
 
     const repo: GateRepository = {
       getTask: vi.fn().mockReturnValue(task),
-      getCurrentStep: vi.fn().mockReturnValue(step),
+      getCurrentSteps: vi.fn().mockReturnValue([step]),
       getTaskSteps: vi.fn(),
+      getStep: vi.fn(),
       completeAndAdvance: vi.fn(),
       updateTaskStatus: vi.fn(),
       verifyFinalKey: vi.fn(),
@@ -288,8 +349,9 @@ describe('validateCheckpoint', () => {
   it('throws TASK_NOT_FOUND when task does not exist', () => {
     const repo: GateRepository = {
       getTask: vi.fn().mockReturnValue(undefined),
-      getCurrentStep: vi.fn(),
+      getCurrentSteps: vi.fn(),
       getTaskSteps: vi.fn(),
+      getStep: vi.fn(),
       completeAndAdvance: vi.fn(),
       updateTaskStatus: vi.fn(),
       verifyFinalKey: vi.fn(),
@@ -309,8 +371,9 @@ describe('validateCheckpoint', () => {
     const task = makeTask({ status: 'completed' });
     const repo: GateRepository = {
       getTask: vi.fn().mockReturnValue(task),
-      getCurrentStep: vi.fn(),
+      getCurrentSteps: vi.fn(),
       getTaskSteps: vi.fn(),
+      getStep: vi.fn(),
       completeAndAdvance: vi.fn(),
       updateTaskStatus: vi.fn(),
       verifyFinalKey: vi.fn(),
@@ -330,8 +393,9 @@ describe('validateCheckpoint', () => {
     const task = makeTask();
     const repo: GateRepository = {
       getTask: vi.fn().mockReturnValue(task),
-      getCurrentStep: vi.fn().mockReturnValue(undefined),
+      getCurrentSteps: vi.fn().mockReturnValue([]),
       getTaskSteps: vi.fn(),
+      getStep: vi.fn(),
       completeAndAdvance: vi.fn(),
       updateTaskStatus: vi.fn(),
       verifyFinalKey: vi.fn(),
@@ -347,13 +411,14 @@ describe('validateCheckpoint', () => {
     expect((error as GateError).code).toBe(GateErrorCode.INTERNAL_ERROR);
   });
 
-  it('throws INVALID_CURRENT_STEP when stepId does not match current step', () => {
+  it('throws INVALID_CURRENT_STEP when stepId does not match any current step', () => {
     const step = makeStep({ id: 'step-current' });
     const task = makeTask();
     const repo: GateRepository = {
       getTask: vi.fn().mockReturnValue(task),
-      getCurrentStep: vi.fn().mockReturnValue(step),
+      getCurrentSteps: vi.fn().mockReturnValue([step]),
       getTaskSteps: vi.fn(),
+      getStep: vi.fn(),
       completeAndAdvance: vi.fn(),
       updateTaskStatus: vi.fn(),
       verifyFinalKey: vi.fn(),
@@ -378,8 +443,9 @@ describe('validateCheckpoint', () => {
     const task = makeTask();
     const repo: GateRepository = {
       getTask: vi.fn().mockReturnValue(task),
-      getCurrentStep: vi.fn().mockReturnValue(step),
+      getCurrentSteps: vi.fn().mockReturnValue([step]),
       getTaskSteps: vi.fn(),
+      getStep: vi.fn(),
       completeAndAdvance: vi.fn(),
       updateTaskStatus: vi.fn(),
       verifyFinalKey: vi.fn(),
@@ -395,117 +461,184 @@ describe('validateCheckpoint', () => {
     expect((error as GateError).code).toBe(GateErrorCode.INVALID_STEP_KEY);
     expect((error as GateError).currentStep).toBeDefined();
   });
+
+  it('accepts checkpoint for any of multiple current steps (DAG)', () => {
+    const stepA = makeStep({ id: 'step-a', orderIndex: 1, stepKeyHash: hashKey('KEYAAAA') });
+    const stepB = makeStep({ id: 'step-b', orderIndex: 2, stepKeyHash: hashKey('KEYBBBB') });
+    const task = makeTask({ totalSteps: 4 });
+    const repo: GateRepository = {
+      getTask: vi.fn().mockReturnValue(task),
+      getCurrentSteps: vi.fn().mockReturnValue([stepA, stepB]),
+      getTaskSteps: vi.fn(),
+      getStep: vi.fn(),
+      completeAndAdvance: vi.fn(),
+      updateTaskStatus: vi.fn(),
+      verifyFinalKey: vi.fn(),
+    };
+
+    // Can validate step-b (second current step)
+    const result = validateCheckpoint(repo, task.id, 'step-b', 'KEYBBBB');
+    expect(result.currentStep.id).toBe('step-b');
+  });
 });
 
 // ============================================================================
-// gate.ts tests — advanceStep
+// gate.ts tests — advanceSteps (DAG)
 // ============================================================================
 
-describe('advanceStep', () => {
-  it('advances to the next step and returns nextStep info with key', () => {
-    const task = makeTask({ totalSteps: 3 });
-    const currentStep = makeStep({ id: 'step-1', orderIndex: 1, status: 'current' });
-    const nextStepRow = makeStep({ id: 'step-2', orderIndex: 2, status: 'pending', path: 'Step 2' });
+describe('advanceSteps', () => {
+  it('activates multiple next steps when dependencies are all satisfied', () => {
+    // DAG: init → modA, init → modB, [modA, modB] → integrate
+    const init = makeStep({ id: 'init', orderIndex: 1, dependsOn: [], status: 'current' });
+    const modA = makeStep({ id: 'modA', orderIndex: 2, dependsOn: ['init'], status: 'pending' });
+    const modB = makeStep({ id: 'modB', orderIndex: 3, dependsOn: ['init'], status: 'pending', path: 'Module B' });
+    const integrate = makeStep({ id: 'integrate', orderIndex: 4, dependsOn: ['modA', 'modB'], status: 'pending', path: 'Integrate' });
+    const task = makeTask({ totalSteps: 4 });
+
+    const allSteps = [init, modA, modB, integrate];
 
     const repo: GateRepository = {
       getTask: vi.fn().mockReturnValue(task),
-      getCurrentStep: vi.fn(),
-      getTaskSteps: vi.fn().mockReturnValue([currentStep, nextStepRow, makeStep({ id: 'step-3', orderIndex: 3, status: 'pending' })]),
+      getCurrentSteps: vi.fn(),
+      getTaskSteps: vi.fn().mockReturnValue(allSteps),
+      getStep: vi.fn(),
       completeAndAdvance: vi.fn(),
       updateTaskStatus: vi.fn(),
       verifyFinalKey: vi.fn(),
     };
 
-    const result = advanceStep(repo, task, currentStep);
+    // Complete 'init' → both modA and modB should unlock
+    const result = advanceSteps(repo, task, 'init');
 
-    expect(repo.completeAndAdvance).toHaveBeenCalledWith('step-1', 'step-2', expect.any(String), 'task-1', null);
-    expect(result.nextStep).toBeDefined();
-    expect(result.nextStep!.stepId).toBe('step-2');
-    expect(result.nextStep!.path).toBe('Step 2');
-    expect(result.nextStep!.index).toBe(2);
-    expect(result.nextStep!.total).toBe(3);
-    expect(result.nextStepKey).toBeDefined();
-    expect(result.nextStepKey).toMatch(/^[A-Z0-9]{6}$/);
-    expect(result.allStepsCompleted).toBeUndefined();
-    expect(result.finalKey).toBeUndefined();
+    expect(repo.completeAndAdvance).toHaveBeenCalledWith(
+      'init',
+      ['modA', 'modB'],
+      expect.any(Array),
+      'task-1',
+      null
+    );
+    const callArgs = (repo.completeAndAdvance as any).mock.calls[0];
+    expect(callArgs[1]).toHaveLength(2);
+    expect(callArgs[2]).toHaveLength(2);
+    expect(result.nextSteps).toBeDefined();
+    expect(result.nextSteps!.length).toBe(2);
+    expect(result.nextStepKeys).toBeDefined();
+    expect(Object.keys(result.nextStepKeys!)).toHaveLength(2);
   });
 
-  it('returns finalKey when no more steps remain', () => {
-    const task = makeTask({ totalSteps: 2 });
-    const currentStep = makeStep({ id: 'step-2', orderIndex: 2, status: 'current' });
+  it('does not activate a step when not all deps are met (parallel branch)', () => {
+    // init → modA, init → modB (parallel branches)
+    const init = makeStep({ id: 'init', orderIndex: 1, dependsOn: [], status: 'completed' });
+    const modA = makeStep({ id: 'modA', orderIndex: 2, dependsOn: ['init'], status: 'current' });
+    const modB = makeStep({ id: 'modB', orderIndex: 3, dependsOn: ['init'], status: 'current', path: 'Module B' });
+    const integrate = makeStep({ id: 'integrate', orderIndex: 4, dependsOn: ['modA', 'modB'], status: 'pending', path: 'Integrate' });
+    const task = makeTask({ totalSteps: 4 });
+
+    const allSteps = [init, modA, modB, integrate];
 
     const repo: GateRepository = {
       getTask: vi.fn().mockReturnValue(task),
-      getCurrentStep: vi.fn(),
-      getTaskSteps: vi.fn().mockReturnValue([
-        makeStep({ id: 'step-1', orderIndex: 1, status: 'completed' }),
-        currentStep,
-      ]),
+      getCurrentSteps: vi.fn(),
+      getTaskSteps: vi.fn().mockReturnValue(allSteps),
+      getStep: vi.fn(),
       completeAndAdvance: vi.fn(),
       updateTaskStatus: vi.fn(),
       verifyFinalKey: vi.fn(),
     };
 
-    const result = advanceStep(repo, task, currentStep);
+    // Complete modA — integrate should NOT unlock (modB still pending)
+    const result = advanceSteps(repo, task, 'modA');
 
-    expect(repo.completeAndAdvance).toHaveBeenCalledWith('step-2', null, null, 'task-1', expect.any(String));
+    expect(repo.completeAndAdvance).toHaveBeenCalledWith('modA', [], [], 'task-1', null);
+    expect(result.nextSteps).toBeUndefined();
+    expect(result.nextStepKeys).toBeUndefined();
+    expect(result.allStepsCompleted).toBeUndefined();
+  });
+
+  it('returns finalKey when last step completes all', () => {
+    const step1 = makeStep({ id: 'step-2', orderIndex: 2, dependsOn: [], status: 'current' });
+    const task = makeTask({ totalSteps: 2 });
+
+    const allSteps = [
+      makeStep({ id: 'step-1', orderIndex: 1, dependsOn: [], status: 'completed' }),
+      step1,
+    ];
+
+    const repo: GateRepository = {
+      getTask: vi.fn().mockReturnValue(task),
+      getCurrentSteps: vi.fn(),
+      getTaskSteps: vi.fn().mockReturnValue(allSteps),
+      getStep: vi.fn(),
+      completeAndAdvance: vi.fn(),
+      updateTaskStatus: vi.fn(),
+      verifyFinalKey: vi.fn(),
+    };
+
+    const result = advanceSteps(repo, task, 'step-2');
+
+    expect(repo.completeAndAdvance).toHaveBeenCalledWith('step-2', [], [], 'task-1', expect.any(String));
     expect(result.allStepsCompleted).toBe(true);
     expect(result.finalKey).toBeDefined();
     expect(result.finalKey).toMatch(/^[A-Z0-9]{6}$/);
-    expect(result.nextStep).toBeUndefined();
-    expect(result.nextStepKey).toBeUndefined();
   });
 
-  it('records step_completed event for completed step', () => {
-    const task = makeTask({ totalSteps: 2 });
-    const currentStep = makeStep({ id: 'step-1', orderIndex: 1, path: 'Phase / Step 1' });
+  it('activates unlocked step in simple serial case', () => {
+    const step1 = makeStep({ id: 'step-1', orderIndex: 1, dependsOn: [], status: 'current' });
+    const step2 = makeStep({ id: 'step-2', orderIndex: 2, dependsOn: ['step-1'], status: 'pending', path: 'Step 2' });
+    const task = makeTask({ totalSteps: 3 });
+    const allSteps = [step1, step2, makeStep({ id: 'step-3', orderIndex: 3, dependsOn: ['step-2'], status: 'pending' })];
 
     const repo: GateRepository = {
       getTask: vi.fn().mockReturnValue(task),
-      getCurrentStep: vi.fn(),
-      getTaskSteps: vi.fn().mockReturnValue([
-        currentStep,
-        makeStep({ id: 'step-2', orderIndex: 2, status: 'pending' }),
-      ]),
+      getCurrentSteps: vi.fn(),
+      getTaskSteps: vi.fn().mockReturnValue(allSteps),
+      getStep: vi.fn(),
       completeAndAdvance: vi.fn(),
       updateTaskStatus: vi.fn(),
       verifyFinalKey: vi.fn(),
     };
 
-    const result = advanceStep(repo, task, currentStep);
+    const result = advanceSteps(repo, task, 'step-1');
 
-    expect(repo.completeAndAdvance).toHaveBeenCalledWith(
-      currentStep.id,
-      'step-2',
-      expect.any(String),
-      task.id,
-      null
-    );
-    expect(result.nextStep).toBeDefined();
+    expect(repo.completeAndAdvance).toHaveBeenCalledWith('step-1', ['step-2'], expect.any(Array), 'task-1', null);
+    expect(result.nextSteps).toBeDefined();
+    expect(result.nextSteps![0].stepId).toBe('step-2');
+    expect(result.nextSteps![0].path).toBe('Step 2');
+    expect(result.nextSteps![0].index).toBe(2);
+    expect(result.nextSteps![0].total).toBe(3);
+    expect(result.nextStepKeys).toBeDefined();
+    expect(Object.keys(result.nextStepKeys!)[0]).toBe('step-2');
+    const key = (result.nextStepKeys as any)['step-2'];
+    expect(key).toMatch(/^[A-Z0-9]{6}$/);
   });
 
-  it('records all_steps_completed event on last step', () => {
-    const task = makeTask({ totalSteps: 1 });
-    const currentStep = makeStep({ id: 'step-1', orderIndex: 1 });
+  it('returns empty object when completing parallel branch while other branches run', () => {
+    // Two parallel branches: init→modA, init→modB. Both are current (after init completed).
+    // Complete modA — nothing unlocks because modB is still current.
+    const modA = makeStep({ id: 'modA', orderIndex: 2, dependsOn: ['init'], status: 'current' });
+    const task = makeTask({ totalSteps: 4 });
+    const allSteps = [
+      makeStep({ id: 'init', orderIndex: 1, dependsOn: [], status: 'completed' }),
+      modA,
+      makeStep({ id: 'modB', orderIndex: 3, dependsOn: ['init'], status: 'current' }),
+      makeStep({ id: 'integrate', orderIndex: 4, dependsOn: ['modA', 'modB'], status: 'pending' }),
+    ];
 
     const repo: GateRepository = {
       getTask: vi.fn().mockReturnValue(task),
-      getCurrentStep: vi.fn(),
-      getTaskSteps: vi.fn().mockReturnValue([currentStep]),
+      getCurrentSteps: vi.fn(),
+      getTaskSteps: vi.fn().mockReturnValue(allSteps),
+      getStep: vi.fn(),
       completeAndAdvance: vi.fn(),
       updateTaskStatus: vi.fn(),
       verifyFinalKey: vi.fn(),
     };
 
-    const result = advanceStep(repo, task, currentStep);
+    const result = advanceSteps(repo, task, 'modA');
 
-    expect(repo.completeAndAdvance).toHaveBeenCalledWith(
-      currentStep.id,
-      null,
-      null,
-      task.id,
-      expect.any(String)
-    );
-    expect(result.allStepsCompleted).toBe(true);
+    // Should complete modA with no next steps activated
+    expect(repo.completeAndAdvance).toHaveBeenCalledWith('modA', [], [], 'task-1', null);
+    expect(result.nextSteps).toBeUndefined();
+    expect(result.allStepsCompleted).toBeUndefined();
   });
 });

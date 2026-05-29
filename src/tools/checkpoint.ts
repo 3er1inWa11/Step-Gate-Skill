@@ -1,13 +1,13 @@
 // ============================================================================
 // Agent Step Gate — gate_checkpoint MCP Tool
-// Wave 3 (A6): Complete current step and advance to next
+// Phase 2: Supports DAG — returns multiple next steps, stepId is required.
 // ============================================================================
 
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { GateCheckpointInput, GateCheckpointOutput } from '../types/index.js';
 import { GateError, GateErrorCode } from '../core/errors.js';
-import { validateCheckpoint, advanceStep } from '../core/gate.js';
+import { validateCheckpoint, advanceSteps } from '../core/gate.js';
 import * as repo from '../storage/repository.js';
 
 // ---------------------------------------------------------------------------
@@ -24,8 +24,8 @@ async function handleCheckpoint(params: GateCheckpointInput): Promise<GateCheckp
       params.stepKey,
     );
 
-    // Advance the state machine
-    const result = advanceStep(repo, task, currentStep);
+    // Advance the DAG state machine
+    const result = advanceSteps(repo, task, params.stepId);
 
     // All steps completed → return final_key
     if (result.allStepsCompleted) {
@@ -37,12 +37,12 @@ async function handleCheckpoint(params: GateCheckpointInput): Promise<GateCheckp
       };
     }
 
-    // Normal step → return next_step + next_step_key
+    // Normal advance → return next steps (may be empty if parallel branch)
     return {
       accepted: true,
       completedStep: { stepId: currentStep.id, path: currentStep.path },
-      nextStep: result.nextStep,
-      nextStepKey: result.nextStepKey,
+      nextSteps: result.nextSteps,
+      nextStepKeys: result.nextStepKeys,
     };
   } catch (err) {
     if (err instanceof GateError) {
@@ -72,7 +72,7 @@ async function handleCheckpoint(params: GateCheckpointInput): Promise<GateCheckp
 export function registerCheckpoint(server: McpServer): void {
   server.tool(
     'gate_checkpoint',
-    'Complete the current step and get the next step key. Returns final_key when all steps are done.',
+    'Complete a current step and unlock next steps whose dependencies are satisfied. Returns next step keys (may be multiple for parallel branches). Returns final_key when all steps are done.',
     {
       taskId: z.string().describe('The task ID'),
       stepId: z.string().describe('The step ID being completed'),

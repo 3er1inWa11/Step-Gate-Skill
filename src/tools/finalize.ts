@@ -1,12 +1,12 @@
 // ============================================================================
 // Agent Step Gate — gate_finalize MCP Tool
-// Phase 1 MVP: Verifies final_key, transitions task → completed
+// Phase 2: Returns pendingSteps on failure so Agent sees what's missing.
 // ============================================================================
 
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { GateFinalizeInput, GateFinalizeOutput } from '../types/index.js';
-import { getTask, getCurrentStep, verifyFinalKey, updateTaskStatus, addEvent } from '../storage/repository.js';
+import { getTask, getCurrentSteps, getTaskSteps, verifyFinalKey, updateTaskStatus, addEvent } from '../storage/repository.js';
 
 // ---------------------------------------------------------------------------
 // Zod input schema
@@ -44,20 +44,23 @@ async function handleFinalize(params: GateFinalizeInput): Promise<GateFinalizeOu
   // 3. Verify final_key
   const isValid = verifyFinalKey(params.taskId, params.finalKey);
   if (!isValid) {
-    const currentStep = getCurrentStep(params.taskId);
+    // Collect pending steps (all steps not completed)
+    const allSteps = getTaskSteps(params.taskId);
+    const pendingSteps = allSteps
+      .filter(s => s.status !== 'completed')
+      .map(s => ({
+        stepId: s.id,
+        path: s.path,
+        index: s.orderIndex,
+        total: task.totalSteps,
+      }));
+
     const response: GateFinalizeOutput = {
       accepted: false,
       status: 'active',
       message: 'Task cannot be finalized. Some steps are not checkpointed.',
+      pendingSteps,
     };
-    if (currentStep) {
-      response.currentStep = {
-        stepId: currentStep.id,
-        path: currentStep.path,
-        index: currentStep.orderIndex,
-        total: task.totalSteps,
-      };
-    }
     return response;
   }
 
@@ -84,7 +87,7 @@ async function handleFinalize(params: GateFinalizeInput): Promise<GateFinalizeOu
 export function registerFinalize(server: McpServer): void {
   server.tool(
     'gate_finalize',
-    'Finalize a task by verifying the final_key. Stop Hooks can call this to prevent premature task completion.',
+    'Finalize a task by verifying the final_key. Returns pendingSteps when steps are missing. Stop Hooks can call this to prevent premature task completion.',
     FinalizeInputSchema,
     async (params) => {
       const output = await handleFinalize(params as GateFinalizeInput);

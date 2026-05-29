@@ -32,6 +32,7 @@ db.exec(`
     title TEXT NOT NULL,
     path TEXT NOT NULL,
     order_index INTEGER NOT NULL,
+    depends_on TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     step_key_hash TEXT,
     completed_at TEXT,

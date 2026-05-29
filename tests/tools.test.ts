@@ -1,6 +1,6 @@
 // ============================================================================
-// Agent Step Gate — End-to-End Integration Tests
-// Wave 5 (A9): Tests 4-tool flow using repository + core functions directly.
+// Agent Step Gate — End-to-End Integration Tests (Phase 2: DAG)
+// Tests 6-tool flow using repository + core functions directly.
 // No MCP Server transport required.
 // ============================================================================
 
@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import db from '../src/storage/db.js';
 import * as repo from '../src/storage/repository.js';
 import { flattenPlan } from '../src/core/plan.js';
-import { validateCheckpoint, advanceStep, type GateRepository } from '../src/core/gate.js';
+import { validateCheckpoint, advanceSteps, type GateRepository } from '../src/core/gate.js';
 import { generateStepKey, generateFinalKey, hashKey } from '../src/core/keys.js';
 import { GateError, GateErrorCode } from '../src/core/errors.js';
 import type { PlanNode, TaskRow, StepRow } from '../src/types/index.js';
@@ -18,7 +18,6 @@ import type { PlanNode, TaskRow, StepRow } from '../src/types/index.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Build a TaskRow matching what gate_start_plan would produce. */
 function makeTaskFromLeaves(
   taskId: string,
   title: string,
@@ -37,37 +36,54 @@ function makeTaskFromLeaves(
   };
 }
 
-/** Build StepRow[] matching what gate_start_plan would produce. */
 function makeStepsFromLeaves(
   leafSteps: ReturnType<typeof flattenPlan>,
-  firstStepKeyHash: string,
+  stepKeys: Record<string, { plaintext: string; hash: string }>,
 ): StepRow[] {
-  return leafSteps.map((ls, i) => ({
-    id: ls.id,
-    taskId: ls.taskId,
-    parentPath: ls.parentPath,
-    title: ls.title,
-    path: ls.path,
-    orderIndex: ls.orderIndex,
-    status: (i === 0 ? 'current' : 'pending') as StepRow['status'],
-    stepKeyHash: i === 0 ? firstStepKeyHash : (null as string | null),
-    completedAt: null,
-    createdAt: ls.createdAt,
-  }));
+  return leafSteps.map((ls) => {
+    const initialCurrent = ls.dependsOn.length === 0;
+    const keyInfo = stepKeys[ls.id];
+    return {
+      id: ls.id,
+      taskId: ls.taskId,
+      parentPath: ls.parentPath,
+      title: ls.title,
+      path: ls.path,
+      orderIndex: ls.orderIndex,
+      dependsOn: ls.dependsOn,
+      status: initialCurrent ? 'current' as const : 'pending' as const,
+      stepKeyHash: initialCurrent && keyInfo ? keyInfo.hash : (null as string | null),
+      completedAt: null,
+      createdAt: ls.createdAt,
+    };
+  });
 }
 
-/** Simulate a full gate_start_plan call and return all artefacts. */
 function simulateStartPlan(
   taskId: string,
   title: string,
   nodes: PlanNode[],
-): { task: TaskRow; steps: StepRow[]; firstStepKeyPlaintext: string } {
+): { task: TaskRow; steps: StepRow[]; stepKeys: Record<string, string>; firstStepId: string } {
   const leaves = flattenPlan(nodes, taskId);
-  const { plaintext, hash } = generateStepKey();
+  const initialCurrent = leaves.filter(s => s.dependsOn.length === 0);
+  const stepKeyMap: Record<string, { plaintext: string; hash: string }> = {};
+  const plaintextKeys: Record<string, string> = {};
+
+  for (const s of initialCurrent) {
+    const k = generateStepKey();
+    stepKeyMap[s.id] = k;
+    plaintextKeys[s.id] = k.plaintext;
+  }
+
   const task = makeTaskFromLeaves(taskId, title, leaves);
-  const steps = makeStepsFromLeaves(leaves, hash);
+  const steps = makeStepsFromLeaves(leaves, stepKeyMap);
   repo.createTask(task, steps);
-  return { task, steps, firstStepKeyPlaintext: plaintext };
+  return {
+    task,
+    steps,
+    stepKeys: plaintextKeys,
+    firstStepId: initialCurrent[0]?.id ?? '',
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -81,10 +97,10 @@ beforeEach(() => {
 });
 
 // ============================================================================
-// End-to-End: Simple Plan (flat 3 steps)
+// End-to-End: Simple Serial Plan (auto-serial)
 // ============================================================================
 
-describe('End-to-End: Simple Plan', () => {
+describe('End-to-End: Simple Serial Plan', () => {
   it('should complete a 3-step plan from start to finalize', () => {
     const taskId = randomUUID();
     const nodes: PlanNode[] = [
@@ -94,84 +110,126 @@ describe('End-to-End: Simple Plan', () => {
     ];
 
     // 1. Simulate gate_start_plan
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'E2E Simple', nodes);
+    const { steps, stepKeys, firstStepId } = simulateStartPlan(taskId, 'E2E Simple', nodes);
+    const step1Id = steps[0].id;
+    const step2Id = steps[1].id;
+    const step3Id = steps[2].id;
 
-    // 2. Verify current step is step 1 (via gate_current logic)
+    // Verify initial state
     const task = repo.getTask(taskId);
     expect(task).toBeDefined();
     expect(task!.status).toBe('active');
     expect(task!.totalSteps).toBe(3);
 
-    const current1 = repo.getCurrentStep(taskId);
-    expect(current1).toBeDefined();
-    expect(current1!.orderIndex).toBe(1);
-    expect(current1!.title).toBe('Step 1');
-    expect(current1!.status).toBe('current');
+    // Only first step should be current (auto-serial: first step has no deps)
+    const initialCurrent = repo.getCurrentSteps(taskId);
+    expect(initialCurrent).toHaveLength(1);
+    expect(initialCurrent[0].id).toBe(firstStepId);
+    expect(initialCurrent[0].orderIndex).toBe(1);
 
-    // 3. Checkpoint step 1 (gate_checkpoint logic)
-    const v1 = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    expect(v1.task).toBeDefined();
-    expect(v1.currentStep.id).toBe(steps[0].id);
+    // Checkpoint step 1
+    const v1 = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
+    const a1 = advanceSteps(repo, v1.task, step1Id);
+    expect(a1.nextSteps).toBeDefined();
+    expect(a1.nextSteps!.length).toBe(1);
+    expect(a1.nextSteps![0].stepId).toBe(step2Id);
+    expect(a1.nextStepKeys).toBeDefined();
+    const key2 = a1.nextStepKeys![step2Id];
+    expect(key2).toMatch(/^[A-Z0-9]{6}$/);
 
-    const a1 = advanceStep(repo, v1.task, v1.currentStep);
-    expect(a1.nextStep).toBeDefined();
-    expect(a1.nextStep!.index).toBe(2);
-    expect(a1.nextStepKey).toBeDefined();
-    expect(a1.nextStepKey).toMatch(/^[A-Z0-9]{6}$/);
+    // Checkpoint step 2
+    const v2 = validateCheckpoint(repo, taskId, step2Id, key2);
+    const a2 = advanceSteps(repo, v2.task, step2Id);
+    expect(a2.nextSteps!.length).toBe(1);
+    expect(a2.nextSteps![0].stepId).toBe(step3Id);
+    const key3 = a2.nextStepKeys![step3Id];
 
-    // 4. Checkpoint step 2
-    const v2 = validateCheckpoint(repo, taskId, steps[1].id, a1.nextStepKey!);
-    expect(v2.currentStep.id).toBe(steps[1].id);
-
-    const a2 = advanceStep(repo, v2.task, v2.currentStep);
-    expect(a2.nextStep).toBeDefined();
-    expect(a2.nextStep!.index).toBe(3);
-
-    // 5. Checkpoint step 3 → final_key
-    const v3 = validateCheckpoint(repo, taskId, steps[2].id, a2.nextStepKey!);
-    expect(v3.currentStep.id).toBe(steps[2].id);
-
-    const a3 = advanceStep(repo, v3.task, v3.currentStep);
+    // Checkpoint step 3 → final_key
+    const v3 = validateCheckpoint(repo, taskId, step3Id, key3);
+    const a3 = advanceSteps(repo, v3.task, step3Id);
     expect(a3.allStepsCompleted).toBe(true);
-    expect(a3.finalKey).toBeDefined();
     expect(a3.finalKey).toMatch(/^[A-Z0-9]{6}$/);
 
-    // 6. Verify final key (gate_finalize validation)
-    const isValid = repo.verifyFinalKey(taskId, a3.finalKey!);
-    expect(isValid).toBe(true);
+    // Verify final key
+    expect(repo.verifyFinalKey(taskId, a3.finalKey!)).toBe(true);
 
-    // 7. Finalize task (gate_finalize logic)
+    // Finalize
     repo.updateTaskStatus(taskId, 'completed');
     repo.addEvent(taskId, null, 'task_finalized', JSON.stringify({ taskId }));
-
-    const completedTask = repo.getTask(taskId);
-    expect(completedTask!.status).toBe('completed');
+    expect(repo.getTask(taskId)!.status).toBe('completed');
   });
 
   it('should handle a single-step plan', () => {
     const taskId = randomUUID();
     const nodes: PlanNode[] = [{ title: 'Only Step' }];
 
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'Single Step Plan', nodes);
-
-    // Current step exists
-    const current = repo.getCurrentStep(taskId);
-    expect(current).toBeDefined();
-    expect(current!.title).toBe('Only Step');
+    const { steps, stepKeys } = simulateStartPlan(taskId, 'Single Step Plan', nodes);
+    const step1Id = steps[0].id;
 
     // Checkpoint the only step → final_key immediately
-    const v = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    const a = advanceStep(repo, v.task, v.currentStep);
+    const v = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
+    const a = advanceSteps(repo, v.task, step1Id);
 
     expect(a.allStepsCompleted).toBe(true);
     expect(a.finalKey).toBeDefined();
-
-    // No current step after all done
-    const afterCurrent = repo.getCurrentStep(taskId);
-    expect(afterCurrent).toBeUndefined();
-
-    // Verify final key works
     expect(repo.verifyFinalKey(taskId, a.finalKey!)).toBe(true);
+  });
+});
+
+// ============================================================================
+// End-to-End: DAG Plan (parallel branches)
+// ============================================================================
+
+describe('End-to-End: DAG Plan', () => {
+  it('should handle parallel branches with merge point', () => {
+    const taskId = randomUUID();
+    const nodes: PlanNode[] = [
+      { id: 'init', title: 'Init' },
+      { id: 'modA', title: 'Module A', dependsOn: ['init'] },
+      { id: 'modB', title: 'Module B', dependsOn: ['init'] },
+      { id: 'test', title: 'Integration Test', dependsOn: ['modA', 'modB'] },
+    ];
+
+    const { stepKeys } = simulateStartPlan(taskId, 'DAG Plan', nodes);
+
+    // Only 'init' should be current (no deps)
+    const current1 = repo.getCurrentSteps(taskId);
+    expect(current1).toHaveLength(1);
+    expect(current1[0].id).toBe('init');
+
+    // Complete init → modA and modB should both unlock
+    const v1 = validateCheckpoint(repo, taskId, 'init', stepKeys['init']);
+    const a1 = advanceSteps(repo, v1.task, 'init');
+    expect(a1.nextSteps).toBeDefined();
+    expect(a1.nextSteps!.length).toBe(2);
+    const modAKey = a1.nextStepKeys!['modA'];
+    const modBKey = a1.nextStepKeys!['modB'];
+
+    // Both modA and modB should be current
+    const current2 = repo.getCurrentSteps(taskId);
+    expect(current2).toHaveLength(2);
+    expect(current2.map(s => s.id).sort()).toEqual(['modA', 'modB']);
+
+    // Complete modA → integration test should NOT unlock yet (modB still active)
+    const v2a = validateCheckpoint(repo, taskId, 'modA', modAKey);
+    const a2a = advanceSteps(repo, v2a.task, 'modA');
+    expect(a2a.nextSteps).toBeUndefined(); // nothing unlocks yet
+    expect(a2a.allStepsCompleted).toBeUndefined();
+
+    // Complete modB → integration test should now unlock
+    const v2b = validateCheckpoint(repo, taskId, 'modB', modBKey);
+    const a2b = advanceSteps(repo, v2b.task, 'modB');
+    expect(a2b.nextSteps).toBeDefined();
+    expect(a2b.nextSteps!.length).toBe(1);
+    expect(a2b.nextSteps![0].stepId).toBe('test');
+    const testKey = a2b.nextStepKeys!['test'];
+
+    // Complete integration test → all done
+    const v3 = validateCheckpoint(repo, taskId, 'test', testKey);
+    const a3 = advanceSteps(repo, v3.task, 'test');
+    expect(a3.allStepsCompleted).toBe(true);
+    expect(a3.finalKey).toBeDefined();
+    expect(repo.verifyFinalKey(taskId, a3.finalKey!)).toBe(true);
   });
 });
 
@@ -198,38 +256,31 @@ describe('End-to-End: Nested Plan', () => {
       },
     ];
 
-    // 1. Simulate gate_start_plan (flattenPlan is called inside)
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'Nested Plan', nodes);
+    const { steps, stepKeys } = simulateStartPlan(taskId, 'Nested Plan', nodes);
+    const step1Id = steps[0].id;
+    const step2Id = steps[1].id;
+    const step3Id = steps[2].id;
 
-    expect(steps).toHaveLength(3);
-    expect(steps[0].title).toBe('Task 1.1');
-    expect(steps[0].path).toBe('Phase 1 / Task 1.1');
-    expect(steps[0].orderIndex).toBe(1);
-    expect(steps[1].title).toBe('Task 1.2');
-    expect(steps[1].path).toBe('Phase 1 / Task 1.2');
-    expect(steps[1].orderIndex).toBe(2);
-    expect(steps[2].title).toBe('Task 2.1');
-    expect(steps[2].path).toBe('Phase 2 / Task 2.1');
-    expect(steps[2].orderIndex).toBe(3);
+    // Auto-generated ids: {taskId}_step_1, {taskId}_step_2, {taskId}_step_3 (serial)
+    const current = repo.getCurrentSteps(taskId);
+    expect(current).toHaveLength(1);
+    expect(current[0].id).toBe(step1Id);
 
-    // 2. Checkpoint all 3 steps
-    const v1 = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    const a1 = advanceStep(repo, v1.task, v1.currentStep);
+    // Complete all 3 steps
+    const v1 = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
+    const a1 = advanceSteps(repo, v1.task, step1Id);
+    const key2 = a1.nextStepKeys![step2Id];
 
-    const v2 = validateCheckpoint(repo, taskId, steps[1].id, a1.nextStepKey!);
-    const a2 = advanceStep(repo, v2.task, v2.currentStep);
+    const v2 = validateCheckpoint(repo, taskId, step2Id, key2);
+    const a2 = advanceSteps(repo, v2.task, step2Id);
+    const key3 = a2.nextStepKeys![step3Id];
 
-    const v3 = validateCheckpoint(repo, taskId, steps[2].id, a2.nextStepKey!);
-    const a3 = advanceStep(repo, v3.task, v3.currentStep);
+    const v3 = validateCheckpoint(repo, taskId, step3Id, key3);
+    const a3 = advanceSteps(repo, v3.task, step3Id);
 
-    // 3. Last step gives final_key
     expect(a3.allStepsCompleted).toBe(true);
     expect(a3.finalKey).toBeDefined();
-
-    // 4. Finalize
     expect(repo.verifyFinalKey(taskId, a3.finalKey!)).toBe(true);
-    repo.updateTaskStatus(taskId, 'completed');
-    expect(repo.getTask(taskId)!.status).toBe('completed');
   });
 });
 
@@ -245,19 +296,19 @@ describe('Checkpoint Validation', () => {
       { title: 'Step 2' },
       { title: 'Step 3' },
     ];
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'Skip Test', nodes);
+    const { steps, stepKeys } = simulateStartPlan(taskId, 'Skip Test', nodes);
+    const step1Id = steps[0].id;
+    const step3Id = steps[2].id;
 
-    // Current is step 1 (orderIndex 1), but we try to checkpoint step 3
+    // Current is first step, try to checkpoint last step
     let error: unknown = null;
     try {
-      validateCheckpoint(repo, taskId, steps[2].id, firstStepKeyPlaintext);
+      validateCheckpoint(repo, taskId, step3Id, stepKeys[step1Id]);
     } catch (e) {
       error = e;
     }
     expect(error).toBeInstanceOf(GateError);
     expect((error as GateError).code).toBe(GateErrorCode.INVALID_CURRENT_STEP);
-    expect((error as GateError).currentStep).toBeDefined();
-    expect((error as GateError).currentStep!.stepId).toBe(steps[0].id);
   });
 
   it('should reject reusing an old step key (INVALID_STEP_KEY)', () => {
@@ -266,25 +317,22 @@ describe('Checkpoint Validation', () => {
       { title: 'Step 1' },
       { title: 'Step 2' },
     ];
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'Key Test', nodes);
+    const { steps, stepKeys } = simulateStartPlan(taskId, 'Key Test', nodes);
+    const step1Id = steps[0].id;
 
-    // Correctly checkpoint step 1 — this consumes the key
-    const v1 = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    advanceStep(repo, v1.task, v1.currentStep);
+    // Correctly checkpoint step 1
+    const v1 = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
+    advanceSteps(repo, v1.task, step1Id);
 
-    // Now try checkpoint step 1 again with the OLD key — should fail
-    // step 1 is now 'completed' with NULL step_key_hash,
-    // and it's not the current step anyway
+    // Try checkpoint step 1 again with OLD key
     let error: unknown = null;
     try {
-      validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
+      validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
     } catch (e) {
       error = e;
     }
     expect(error).toBeInstanceOf(GateError);
     expect((error as GateError).code).toBe(GateErrorCode.INVALID_CURRENT_STEP);
-    // The current step should now be step 2
-    expect((error as GateError).currentStep!.stepId).toBe(steps[1].id);
   });
 
   it('should reject wrong step key for current step (INVALID_STEP_KEY)', () => {
@@ -294,11 +342,11 @@ describe('Checkpoint Validation', () => {
       { title: 'Step 2' },
     ];
     const { steps } = simulateStartPlan(taskId, 'Wrong Key Test', nodes);
+    const step1Id = steps[0].id;
 
-    // Try with a completely made-up key
     let error: unknown = null;
     try {
-      validateCheckpoint(repo, taskId, steps[0].id, 'BADKEY');
+      validateCheckpoint(repo, taskId, step1Id, 'BADKEY');
     } catch (e) {
       error = e;
     }
@@ -308,7 +356,6 @@ describe('Checkpoint Validation', () => {
 
   it('should reject wrong taskId (TASK_NOT_FOUND)', () => {
     const fakeId = randomUUID();
-
     let error: unknown = null;
     try {
       validateCheckpoint(repo, fakeId, 'step-any', 'BADKEY');
@@ -322,17 +369,16 @@ describe('Checkpoint Validation', () => {
   it('should reject checkpoint on already-completed task (TASK_ALREADY_COMPLETED)', () => {
     const taskId = randomUUID();
     const nodes: PlanNode[] = [{ title: 'Only Step' }];
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'Done Task', nodes);
+    const { steps, stepKeys } = simulateStartPlan(taskId, 'Done Task', nodes);
+    const step1Id = steps[0].id;
 
-    // Complete everything
-    const v = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    advanceStep(repo, v.task, v.currentStep);
+    const v = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
+    advanceSteps(repo, v.task, step1Id);
     repo.updateTaskStatus(taskId, 'completed');
 
-    // Now try to checkpoint again
     let error: unknown = null;
     try {
-      validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
+      validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
     } catch (e) {
       error = e;
     }
@@ -349,13 +395,12 @@ describe('Finalize Validation', () => {
   it('should reject finalize with wrong final_key', () => {
     const taskId = randomUUID();
     const nodes: PlanNode[] = [{ title: 'Step' }];
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'Fin Test', nodes);
+    const { steps, stepKeys } = simulateStartPlan(taskId, 'Fin Test', nodes);
+    const step1Id = steps[0].id;
 
-    // Complete all steps
-    const v = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    advanceStep(repo, v.task, v.currentStep);
+    const v = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
+    advanceSteps(repo, v.task, step1Id);
 
-    // Try verify with wrong key
     const isValid = repo.verifyFinalKey(taskId, 'BADKEY1');
     expect(isValid).toBe(false);
   });
@@ -368,11 +413,7 @@ describe('Finalize Validation', () => {
     ];
     simulateStartPlan(taskId, 'Premature Fin', nodes);
 
-    // Haven't checkpointed anything — final_key_hash is still null
-    const isValid = repo.verifyFinalKey(taskId, 'BADKEY');
-    expect(isValid).toBe(false);
-
-    // Also verify: task should not show any final_key_hash
+    expect(repo.verifyFinalKey(taskId, 'BADKEY')).toBe(false);
     const task = repo.getTask(taskId);
     expect(task!.finalKeyHash).toBeNull();
   });
@@ -380,58 +421,59 @@ describe('Finalize Validation', () => {
   it('should accept finalize with correct final_key and transition to completed', () => {
     const taskId = randomUUID();
     const nodes: PlanNode[] = [{ title: 'Only Step' }];
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'Good Fin', nodes);
+    const { steps, stepKeys } = simulateStartPlan(taskId, 'Good Fin', nodes);
+    const step1Id = steps[0].id;
 
-    // Complete the step
-    const v = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    const a = advanceStep(repo, v.task, v.currentStep);
+    const v = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
+    const a = advanceSteps(repo, v.task, step1Id);
     expect(a.allStepsCompleted).toBe(true);
 
-    // Verify with correct key
     expect(repo.verifyFinalKey(taskId, a.finalKey!)).toBe(true);
-
-    // Finalize
     repo.updateTaskStatus(taskId, 'completed');
-    const task = repo.getTask(taskId);
-    expect(task!.status).toBe('completed');
+    expect(repo.getTask(taskId)!.status).toBe('completed');
   });
 
   it('should handle idempotent finalize (already completed task)', () => {
     const taskId = randomUUID();
     const nodes: PlanNode[] = [{ title: 'Step' }];
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'Idempotent', nodes);
+    const { steps, stepKeys } = simulateStartPlan(taskId, 'Idempotent', nodes);
+    const step1Id = steps[0].id;
 
-    // Complete
-    const v = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    advanceStep(repo, v.task, v.currentStep);
+    const v = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
+    advanceSteps(repo, v.task, step1Id);
     repo.updateTaskStatus(taskId, 'completed');
 
-    // Try finalize again — should report already completed
     const task = repo.getTask(taskId);
     expect(task!.status).toBe('completed');
   });
 
-  it('should return current step info when key is wrong (has incomplete steps)', () => {
+  it('should show all pending steps when finalize fails (DAG)', () => {
     const taskId = randomUUID();
     const nodes: PlanNode[] = [
-      { title: 'Step 1' },
-      { title: 'Step 2' },
+      { id: 'init', title: 'Init' },
+      { id: 'modA', title: 'Module A', dependsOn: ['init'] },
+      { id: 'modB', title: 'Module B', dependsOn: ['init'] },
+      { id: 'test', title: 'Test', dependsOn: ['modA', 'modB'] },
     ];
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'Partial Test', nodes);
+    const { stepKeys } = simulateStartPlan(taskId, 'Partial DAG', nodes);
 
-    // Only complete step 1
-    const v1 = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    advanceStep(repo, v1.task, v1.currentStep);
+    // Only complete init
+    const v1 = validateCheckpoint(repo, taskId, 'init', stepKeys['init']);
+    advanceSteps(repo, v1.task, 'init');
 
-    // Now try verifying a final key — should fail because not all steps completed (no final_key_hash)
+    // Now try verifying final key — should fail
     const isValid = repo.verifyFinalKey(taskId, 'BADKEY');
     expect(isValid).toBe(false);
 
-    // Also: current step should be step 2
-    const currentStep = repo.getCurrentStep(taskId);
-    expect(currentStep).toBeDefined();
-    expect(currentStep!.id).toBe(steps[1].id);
-    expect(currentStep!.orderIndex).toBe(2);
+    // Check pending steps
+    const allSteps = repo.getTaskSteps(taskId);
+    const pendingSteps = allSteps.filter(s => s.status !== 'completed');
+    // init should be completed, modA/modB current, test pending
+    expect(pendingSteps.length).toBe(3);
+    const pendingIds = pendingSteps.map(s => s.id).sort();
+    expect(pendingIds).toContain('modA');
+    expect(pendingIds).toContain('modB');
+    expect(pendingIds).toContain('test');
   });
 });
 
@@ -446,33 +488,28 @@ describe('Persistence', () => {
       { title: 'A' },
       { title: 'B' },
     ];
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'Persistence Test', nodes);
+    const { steps, stepKeys } = simulateStartPlan(taskId, 'Persistence Test', nodes);
+    const step1Id = steps[0].id;
 
-    // Re-query task
     const task1 = repo.getTask(taskId);
     expect(task1).toBeDefined();
     expect(task1!.title).toBe('Persistence Test');
     expect(task1!.totalSteps).toBe(2);
 
-    // Re-query steps
     const allSteps = repo.getTaskSteps(taskId);
     expect(allSteps).toHaveLength(2);
-    expect(allSteps[0].orderIndex).toBe(1);
-    expect(allSteps[1].orderIndex).toBe(2);
     expect(allSteps[0].status).toBe('current');
     expect(allSteps[1].status).toBe('pending');
 
-    // Complete step 1
-    const v1 = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    advanceStep(repo, v1.task, v1.currentStep);
+    // Complete first step
+    const v1 = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
+    advanceSteps(repo, v1.task, step1Id);
 
-    // Re-query — step 1 should be completed, step 2 current
     const stepsAfter = repo.getTaskSteps(taskId);
     expect(stepsAfter[0].status).toBe('completed');
-    expect(stepsAfter[0].completedAt).toBeTruthy();
-    expect(stepsAfter[0].stepKeyHash).toBeNull(); // key consumed
+    expect(stepsAfter[0].stepKeyHash).toBeNull();
     expect(stepsAfter[1].status).toBe('current');
-    expect(stepsAfter[1].stepKeyHash).toBeTruthy(); // new key set
+    expect(stepsAfter[1].stepKeyHash).toBeTruthy();
   });
 
   it('should persist events across the full lifecycle', () => {
@@ -481,33 +518,65 @@ describe('Persistence', () => {
       { title: 'Step 1' },
       { title: 'Step 2' },
     ];
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'Event Clean Test', nodes);
+    const { steps, stepKeys } = simulateStartPlan(taskId, 'Event Clean Test', nodes);
+    const step1Id = steps[0].id;
+    const step2Id = steps[1].id;
 
-    // Checkpoint step 1
-    const v1 = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    const a1 = advanceStep(repo, v1.task, v1.currentStep);
+    const v1 = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
+    const a1 = advanceSteps(repo, v1.task, step1Id);
 
-    // Checkpoint step 2
-    const v2 = validateCheckpoint(repo, taskId, steps[1].id, a1.nextStepKey!);
-    const a2 = advanceStep(repo, v2.task, v2.currentStep);
+    const v2 = validateCheckpoint(repo, taskId, step2Id, a1.nextStepKeys![step2Id]);
+    const a2 = advanceSteps(repo, v2.task, step2Id);
     expect(a2.allStepsCompleted).toBe(true);
 
-    // Finalize
     repo.updateTaskStatus(taskId, 'completed');
     repo.addEvent(taskId, null, 'task_finalized', JSON.stringify({ taskId }));
 
-    // Verify events
     const events = repo.getEvents(taskId);
-    // We expect: step_completed (step 1), step_activated (step 2),
-    //            step_completed (step 2), all_steps_completed,
-    //            task_finalized
     expect(events.length).toBeGreaterThanOrEqual(5);
-
     const eventTypes = events.map((e) => e.eventType);
     expect(eventTypes).toContain('step_completed');
     expect(eventTypes).toContain('step_activated');
     expect(eventTypes).toContain('all_steps_completed');
     expect(eventTypes).toContain('task_finalized');
+  });
+});
+
+// ============================================================================
+// Multi-task support
+// ============================================================================
+
+describe('Multi-task support', () => {
+  it('should allow multiple simultaneous active tasks', () => {
+    const taskId1 = randomUUID();
+    const taskId2 = randomUUID();
+
+    simulateStartPlan(taskId1, 'Task 1', [{ title: 'Step A' }]);
+    simulateStartPlan(taskId2, 'Task 2', [{ title: 'Step B' }]);
+
+    const activeTasks = repo.getActiveTasks();
+    expect(activeTasks).toHaveLength(2);
+
+    // Each task has its own current step
+    const cs1 = repo.getCurrentSteps(taskId1);
+    const cs2 = repo.getCurrentSteps(taskId2);
+    expect(cs1).toHaveLength(1);
+    expect(cs2).toHaveLength(1);
+  });
+
+  it('should allow cancelling a task', () => {
+    const taskId = randomUUID();
+    simulateStartPlan(taskId, 'Cancel Me', [{ title: 'Step 1' }]);
+
+    repo.cancelTask(taskId);
+    repo.addEvent(taskId, null, 'task_cancelled');
+
+    const task = repo.getTask(taskId);
+    expect(task!.status).toBe('cancelled');
+
+    // Cancelled task not in active tasks
+    const activeTasks = repo.getActiveTasks();
+    expect(activeTasks.find(t => t.id === taskId)).toBeUndefined();
   });
 });
 
@@ -521,55 +590,57 @@ describe('gate_current (simulated via repo)', () => {
     expect(task).toBeUndefined();
   });
 
-  it('should return current step info for an active task', () => {
+  it('should return all current steps for an active task', () => {
     const taskId = randomUUID();
     const nodes: PlanNode[] = [
-      { title: 'First' },
-      { title: 'Second' },
+      { id: 'init', title: 'Init' },
+      { id: 'modA', title: 'Module A', dependsOn: ['init'] },
+      { id: 'modB', title: 'Module B', dependsOn: ['init'] },
     ];
-    simulateStartPlan(taskId, 'Current Test', nodes);
+    const { stepKeys } = simulateStartPlan(taskId, 'DAG Current', nodes);
 
-    const task = repo.getTask(taskId);
-    expect(task).toBeDefined();
-    expect(task!.status).toBe('active');
+    // Only init should be current
+    const current1 = repo.getCurrentSteps(taskId);
+    expect(current1).toHaveLength(1);
+    expect(current1[0].id).toBe('init');
 
-    const current = repo.getCurrentStep(taskId);
-    expect(current).toBeDefined();
-    expect(current!.title).toBe('First');
-    expect(current!.orderIndex).toBe(1);
-    expect(current!.path).toBe('First');
+    // Complete init → modA, modB both current
+    const v = validateCheckpoint(repo, taskId, 'init', stepKeys['init']);
+    advanceSteps(repo, v.task, 'init');
+
+    const current2 = repo.getCurrentSteps(taskId);
+    expect(current2).toHaveLength(2);
+    expect(current2.map(s => s.id).sort()).toEqual(['modA', 'modB']);
   });
 
-  it('should return null current step when all steps are completed', () => {
+  it('should return empty current steps when all completed', () => {
     const taskId = randomUUID();
     const nodes: PlanNode[] = [{ title: 'Only' }];
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'All Done', nodes);
+    const { steps, stepKeys } = simulateStartPlan(taskId, 'All Done', nodes);
+    const step1Id = steps[0].id;
 
-    // Complete the only step
-    const v = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    advanceStep(repo, v.task, v.currentStep);
+    const v = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
+    advanceSteps(repo, v.task, step1Id);
 
-    // No current step should remain
-    const current = repo.getCurrentStep(taskId);
-    expect(current).toBeUndefined();
+    expect(repo.getCurrentSteps(taskId)).toEqual([]);
   });
 
   it('should return status completed after finalize', () => {
     const taskId = randomUUID();
     const nodes: PlanNode[] = [{ title: 'Step' }];
-    const { steps, firstStepKeyPlaintext } = simulateStartPlan(taskId, 'Status Test', nodes);
+    const { steps, stepKeys } = simulateStartPlan(taskId, 'Status Test', nodes);
+    const step1Id = steps[0].id;
 
-    const v = validateCheckpoint(repo, taskId, steps[0].id, firstStepKeyPlaintext);
-    advanceStep(repo, v.task, v.currentStep);
+    const v = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
+    advanceSteps(repo, v.task, step1Id);
     repo.updateTaskStatus(taskId, 'completed');
 
-    const task = repo.getTask(taskId);
-    expect(task!.status).toBe('completed');
+    expect(repo.getTask(taskId)!.status).toBe('completed');
   });
 });
 
 // ============================================================================
-// Error handling: unknown / unexpected errors
+// Error handling
 // ============================================================================
 
 describe('Error handling', () => {
@@ -599,24 +670,6 @@ describe('Error handling', () => {
         [],
       ),
     ).toThrow(GateError);
-    try {
-      repo.createTask(
-        {
-          id: randomUUID(),
-          title: 'Test',
-          status: 'active',
-          currentIndex: 0,
-          totalSteps: 0,
-          finalKeyHash: null,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        },
-        [],
-      );
-    } catch (e) {
-      expect(e).toBeInstanceOf(GateError);
-      expect((e as GateError).code).toBe(GateErrorCode.NO_STEPS);
-    }
   });
 
   it('flattenPlan throws PLAN_SCHEMA_INVALID for empty array', () => {

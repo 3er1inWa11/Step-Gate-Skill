@@ -1,6 +1,6 @@
 // ============================================================================
 // Agent Step Gate — Core Types
-// Phase 1 MVP: Step Ledger + Key Gate data model
+// Phase 2: DAG step dependencies, multi-step support, multi-task support
 // ============================================================================
 
 // ---------------------------------------------------------------------------
@@ -9,8 +9,10 @@
 
 /** Nested step node — input format for gate_start_plan */
 export interface PlanNode {
+  id?: string;
   title: string;
   children?: PlanNode[];
+  dependsOn?: string[];
 }
 
 /** Leaf step after flattening the nested plan (one row in steps table) */
@@ -21,6 +23,7 @@ export interface LeafStep {
   title: string;
   path: string;
   orderIndex: number;
+  dependsOn: string[];
   status: 'pending' | 'current' | 'completed';
   completedAt: string | null;
   createdAt: string;
@@ -34,7 +37,7 @@ export interface LeafStep {
 export interface TaskRow {
   id: string;
   title: string;
-  status: 'active' | 'completed';
+  status: 'active' | 'completed' | 'cancelled';
   currentIndex: number;
   totalSteps: number;
   finalKeyHash: string | null;
@@ -50,6 +53,7 @@ export interface StepRow {
   title: string;
   path: string;
   orderIndex: number;
+  dependsOn: string[];
   status: 'pending' | 'current' | 'completed';
   stepKeyHash: string | null;
   completedAt: string | null;
@@ -90,8 +94,8 @@ export interface GateStartPlanInput {
 export interface GateStartPlanOutput {
   taskId: string;
   status: 'active';
-  currentStep: CurrentStepInfo;
-  stepKey: string;
+  currentSteps: CurrentStepInfo[];
+  stepKeys: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +109,7 @@ export interface GateCurrentInput {
 export interface GateCurrentOutput {
   taskId: string;
   status: string;
-  currentStep: CurrentStepInfo | null;
+  currentSteps: CurrentStepInfo[];
 }
 
 // ---------------------------------------------------------------------------
@@ -121,13 +125,14 @@ export interface GateCheckpointInput {
 export interface GateCheckpointOutput {
   accepted: boolean;
   completedStep?: { stepId: string; path: string };
-  nextStep?: CurrentStepInfo;
-  nextStepKey?: string;
+  nextSteps?: CurrentStepInfo[];
+  nextStepKeys?: Record<string, string>;
   allStepsCompleted?: boolean;
   finalKey?: string;
   error?: string;
   message?: string;
   currentStep?: CurrentStepInfo;
+  pendingSteps?: CurrentStepInfo[];
 }
 
 // ---------------------------------------------------------------------------
@@ -144,4 +149,33 @@ export interface GateFinalizeOutput {
   status?: string;
   message?: string;
   currentStep?: CurrentStepInfo;
+  pendingSteps?: CurrentStepInfo[];
+}
+
+// ---------------------------------------------------------------------------
+// gate_active_task
+// ---------------------------------------------------------------------------
+
+export interface GateActiveTaskOutput {
+  activeTasks: Array<{
+    taskId: string;
+    title: string;
+    status: string;
+    totalSteps: number;
+    completedSteps: number;
+    currentSteps: CurrentStepInfo[];
+  }>;
+}
+
+// ---------------------------------------------------------------------------
+// gate_cancel_task
+// ---------------------------------------------------------------------------
+
+export interface GateCancelTaskInput {
+  taskId: string;
+}
+
+export interface GateCancelTaskOutput {
+  accepted: boolean;
+  message: string;
 }

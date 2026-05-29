@@ -48,6 +48,7 @@ function createSchema(database: Database.Database) {
       title TEXT NOT NULL,
       path TEXT NOT NULL,
       order_index INTEGER NOT NULL,
+      depends_on TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
       step_key_hash TEXT,
       completed_at TEXT,
@@ -98,6 +99,7 @@ function mapStepRow(row: Record<string, unknown>): StepRow {
     title: row.title as string,
     path: row.path as string,
     orderIndex: row.order_index as number,
+    dependsOn: row.depends_on ? (JSON.parse(row.depends_on as string) as string[]) : [],
     status: row.status as StepRow['status'],
     stepKeyHash: (row.step_key_hash as string) ?? null,
     completedAt: (row.completed_at as string) ?? null,
@@ -130,8 +132,8 @@ function createTask(database: Database.Database, task: TaskRow, steps: StepRow[]
   `);
 
   const insertStep = database.prepare(`
-    INSERT INTO steps (id, task_id, parent_path, title, path, order_index, status, step_key_hash, completed_at, created_at)
-    VALUES (@id, @taskId, @parentPath, @title, @path, @orderIndex, @status, @stepKeyHash, @completedAt, @createdAt)
+    INSERT INTO steps (id, task_id, parent_path, title, path, order_index, depends_on, status, step_key_hash, completed_at, created_at)
+    VALUES (@id, @taskId, @parentPath, @title, @path, @orderIndex, @dependsOn, @status, @stepKeyHash, @completedAt, @createdAt)
   `);
 
   const transaction = database.transaction(() => {
@@ -154,6 +156,7 @@ function createTask(database: Database.Database, task: TaskRow, steps: StepRow[]
         title: step.title,
         path: step.path,
         orderIndex: step.orderIndex,
+        dependsOn: JSON.stringify(step.dependsOn),
         status: step.status,
         stepKeyHash: step.stepKeyHash,
         completedAt: step.completedAt,
@@ -180,14 +183,19 @@ function getTask(database: Database.Database, taskId: string): TaskRow | undefin
   return row ? mapTaskRow(row) : undefined;
 }
 
-function getCurrentStep(database: Database.Database, taskId: string): StepRow | undefined {
+function getCurrentSteps(database: Database.Database, taskId: string): StepRow[] {
   if (!taskId) {
     throw new GateError(GateErrorCode.TASK_NOT_FOUND, 'taskId is required');
   }
-  const row = database
-    .prepare("SELECT * FROM steps WHERE task_id = ? AND status = 'current'")
-    .get(taskId) as Record<string, unknown> | undefined;
-  return row ? mapStepRow(row) : undefined;
+  const rows = database
+    .prepare("SELECT * FROM steps WHERE task_id = ? AND status = 'current' ORDER BY order_index ASC")
+    .all(taskId) as Record<string, unknown>[];
+  return rows.map(mapStepRow);
+}
+
+function getCurrentStep(database: Database.Database, taskId: string): StepRow | undefined {
+  const steps = getCurrentSteps(database, taskId);
+  return steps.length > 0 ? steps[0] : undefined;
 }
 
 function getTaskSteps(database: Database.Database, taskId: string): StepRow[] {
@@ -275,6 +283,16 @@ function verifyFinalKey(
   return sha256(keyPlaintext) === task.final_key_hash;
 }
 
+function getActiveTasks(database: Database.Database): TaskRow[] {
+  const rows = database.prepare("SELECT * FROM tasks WHERE status = 'active'").all() as Record<string, unknown>[];
+  return rows.map(mapTaskRow);
+}
+
+function getActiveTask(database: Database.Database): TaskRow | undefined {
+  const row = database.prepare("SELECT * FROM tasks WHERE status = 'active' LIMIT 1").get() as Record<string, unknown> | undefined;
+  return row ? mapTaskRow(row) : undefined;
+}
+
 function addEvent(
   database: Database.Database,
   taskId: string,
@@ -300,6 +318,46 @@ function getEvents(database: Database.Database, taskId: string): EventRow[] {
     .prepare('SELECT * FROM events WHERE task_id = ? ORDER BY created_at ASC')
     .all(taskId) as Record<string, unknown>[];
   return rows.map(mapEventRow);
+}
+
+function completeAndAdvance(
+  database: Database.Database,
+  completedStepId: string,
+  nextStepIds: string[],
+  nextKeyHashes: string[],
+  taskId: string,
+  finalKeyHash: string | null,
+): void {
+  const transaction = database.transaction(() => {
+    database.prepare("UPDATE steps SET status = 'completed', step_key_hash = NULL, completed_at = ? WHERE id = ?")
+      .run(now(), completedStepId);
+    database.prepare("INSERT INTO events (id, task_id, step_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(randomUUID(), taskId, completedStepId, 'step_completed', null, now());
+
+    if (nextStepIds.length > 0) {
+      for (let i = 0; i < nextStepIds.length; i++) {
+        database.prepare("UPDATE steps SET status = 'current', step_key_hash = ? WHERE id = ?")
+          .run(nextKeyHashes[i], nextStepIds[i]);
+        database.prepare("INSERT INTO events (id, task_id, step_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+          .run(randomUUID(), taskId, nextStepIds[i], 'step_activated', null, now());
+      }
+      database.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?')
+        .run(now(), taskId);
+    } else if (finalKeyHash) {
+      database.prepare('UPDATE tasks SET final_key_hash = ?, updated_at = ? WHERE id = ?')
+        .run(finalKeyHash, now(), taskId);
+      database.prepare("INSERT INTO events (id, task_id, step_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(randomUUID(), taskId, null, 'all_steps_completed', null, now());
+    }
+  });
+
+  try {
+    transaction();
+  } catch (err) {
+    if (err instanceof GateError) throw err;
+    throw new GateError(GateErrorCode.INTERNAL_ERROR,
+      `Failed to advance step: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +386,7 @@ function makeStepRows(taskId: string, count: number): StepRow[] {
     title: `Step ${i + 1}`,
     path: `Step ${i + 1}`,
     orderIndex: i,
+    dependsOn: i === 0 ? [] : [],  // will be set per-test
     status: (i === 0 ? 'current' : 'pending') as StepRow['status'],
     stepKeyHash: null,
     completedAt: null,
@@ -341,7 +400,6 @@ function makeStepRows(taskId: string, count: number): StepRow[] {
 
 beforeAll(() => {
   mkdirSync(TEST_DB_DIR, { recursive: true });
-  // Remove stale test db
   try { rmSync(TEST_DB_PATH); } catch { /* ok */ }
   db = new Database(TEST_DB_PATH);
   createSchema(db);
@@ -376,6 +434,21 @@ describe('createTask', () => {
     expect(fetchedSteps[2].orderIndex).toBe(2);
   });
 
+  it('should persist dependsOn as JSON', () => {
+    const task = makeTaskRow();
+    const steps = makeStepRows(task.id, 3);
+    steps[0].dependsOn = [];
+    steps[1].dependsOn = [steps[0].id];
+    steps[2].dependsOn = [steps[1].id];
+
+    createTask(db, task, steps);
+
+    const fetchedSteps = getTaskSteps(db, task.id);
+    expect(fetchedSteps[0].dependsOn).toEqual([]);
+    expect(fetchedSteps[1].dependsOn).toEqual([steps[0].id]);
+    expect(fetchedSteps[2].dependsOn).toEqual([steps[1].id]);
+  });
+
   it('should throw NO_STEPS when steps array is empty', () => {
     const task = makeTaskRow();
     expect(() => createTask(db, task, [])).toThrow(GateError);
@@ -399,8 +472,34 @@ describe('getTask', () => {
   });
 });
 
-describe('getCurrentStep', () => {
-  it('should return the step with status current', () => {
+describe('getCurrentSteps', () => {
+  it('should return all steps with status current', () => {
+    const task = makeTaskRow();
+    const steps = makeStepRows(task.id, 3);
+    steps[0].status = 'current';
+    steps[1].status = 'current'; // parallel branch
+    steps[2].status = 'pending';
+    createTask(db, task, steps);
+
+    const current = getCurrentSteps(db, task.id);
+    expect(current).toHaveLength(2);
+    expect(current[0].status).toBe('current');
+    expect(current[1].status).toBe('current');
+  });
+
+  it('should return empty array if no current step', () => {
+    const task = makeTaskRow();
+    const steps = makeStepRows(task.id, 2);
+    steps[0].status = 'pending';
+    steps[1].status = 'pending';
+    createTask(db, task, steps);
+
+    expect(getCurrentSteps(db, task.id)).toEqual([]);
+  });
+});
+
+describe('getCurrentStep (legacy)', () => {
+  it('should return the first step with status current', () => {
     const task = makeTaskRow();
     const steps = makeStepRows(task.id, 3);
     steps[0].status = 'current';
@@ -569,6 +668,89 @@ describe('verifyFinalKey', () => {
     createTask(db, task, steps);
 
     expect(verifyFinalKey(db, task.id, 'anything')).toBe(false);
+  });
+});
+
+describe('getActiveTasks', () => {
+  it('should return all active tasks', () => {
+    const task1 = makeTaskRow();
+    const task2 = makeTaskRow();
+    createTask(db, task1, makeStepRows(task1.id, 1));
+    createTask(db, task2, makeStepRows(task2.id, 1));
+
+    const tasks = getActiveTasks(db);
+    expect(tasks).toHaveLength(2);
+  });
+
+  it('should return empty array when no active tasks', () => {
+    const tasks = getActiveTasks(db);
+    expect(tasks).toEqual([]);
+  });
+});
+
+describe('getActiveTask (legacy)', () => {
+  it('should return first active task', () => {
+    const task = makeTaskRow();
+    createTask(db, task, makeStepRows(task.id, 1));
+
+    const result = getActiveTask(db);
+    expect(result).toBeDefined();
+    expect(result!.id).toBe(task.id);
+  });
+
+  it('should return undefined when no active tasks', () => {
+    expect(getActiveTask(db)).toBeUndefined();
+  });
+});
+
+describe('completeAndAdvance (DAG)', () => {
+  it('should activate multiple next steps', () => {
+    const task = makeTaskRow();
+    const steps = makeStepRows(task.id, 3);
+    const keyHashes = [sha256('key1'), sha256('key2')];
+    createTask(db, task, steps);
+
+    completeAndAdvance(db, steps[0].id, [steps[1].id, steps[2].id], keyHashes, task.id, null);
+
+    // Step 0 should be completed
+    const raw0 = db.prepare('SELECT * FROM steps WHERE id = ?').get(steps[0].id) as Record<string, unknown>;
+    expect(mapStepRow(raw0).status).toBe('completed');
+
+    // Steps 1 and 2 should be current
+    const raw1 = db.prepare('SELECT * FROM steps WHERE id = ?').get(steps[1].id) as Record<string, unknown>;
+    expect(mapStepRow(raw1).status).toBe('current');
+    expect(mapStepRow(raw1).stepKeyHash).toBe(keyHashes[0]);
+
+    const raw2 = db.prepare('SELECT * FROM steps WHERE id = ?').get(steps[2].id) as Record<string, unknown>;
+    expect(mapStepRow(raw2).status).toBe('current');
+    expect(mapStepRow(raw2).stepKeyHash).toBe(keyHashes[1]);
+  });
+
+  it('should store final_key_hash when all done', () => {
+    const task = makeTaskRow();
+    const steps = makeStepRows(task.id, 1);
+    createTask(db, task, steps);
+
+    const finalHash = sha256('final');
+    completeAndAdvance(db, steps[0].id, [], [], task.id, finalHash);
+
+    const updated = getTask(db, task.id);
+    expect(updated!.finalKeyHash).toBe(finalHash);
+  });
+
+  it('should just complete step when no next steps and no finalKeyHash', () => {
+    const task = makeTaskRow();
+    const steps = makeStepRows(task.id, 1);
+    createTask(db, task, steps);
+
+    completeAndAdvance(db, steps[0].id, [], [], task.id, null);
+
+    const raw0 = db.prepare('SELECT * FROM steps WHERE id = ?').get(steps[0].id) as Record<string, unknown>;
+    expect(mapStepRow(raw0).status).toBe('completed');
+
+    // No final_key_hash set
+    const updated = getTask(db, task.id);
+    expect(updated!.finalKeyHash).toBeNull();
   });
 });
 

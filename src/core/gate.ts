@@ -4,9 +4,10 @@ import { generateStepKey, generateFinalKey, hashKey } from './keys.js';
 
 export interface GateRepository {
   getTask(taskId: string): TaskRow | undefined;
-  getCurrentStep(taskId: string): StepRow | undefined;
+  getCurrentSteps(taskId: string): StepRow[];
   getTaskSteps(taskId: string): StepRow[];
-  completeAndAdvance(completedStepId: string, nextStepId: string | null, nextKeyHash: string | null, taskId: string, finalKeyHash: string | null): void;
+  getStep(stepId: string): StepRow | undefined;
+  completeAndAdvance(completedStepId: string, nextStepIds: string[], nextKeyHashes: string[], taskId: string, finalKeyHash: string | null): void;
   updateTaskStatus(taskId: string, status: string): void;
   verifyFinalKey(taskId: string, keyPlaintext: string): boolean;
 }
@@ -26,19 +27,20 @@ export function validateCheckpoint(
     throw new GateError(GateErrorCode.TASK_ALREADY_COMPLETED, `Task already completed: ${taskId}`);
   }
 
-  const currentStep = repo.getCurrentStep(taskId);
-  if (!currentStep) {
+  const currentSteps = repo.getCurrentSteps(taskId);
+  if (currentSteps.length === 0) {
     throw new GateError(GateErrorCode.INTERNAL_ERROR, 'No current step found');
   }
 
-  if (currentStep.id !== stepId) {
+  const currentStep = currentSteps.find(s => s.id === stepId);
+  if (!currentStep) {
     throw new GateError(
       GateErrorCode.INVALID_CURRENT_STEP,
-      `Step ${stepId} is not the current step`,
+      `Step ${stepId} is not a current step. Current steps: [${currentSteps.map(s => s.id).join(', ')}]`,
       {
-        stepId: currentStep.id,
-        path: currentStep.path,
-        index: currentStep.orderIndex,
+        stepId: currentSteps[0].id,
+        path: currentSteps[0].path,
+        index: currentSteps[0].orderIndex,
         total: task.totalSteps,
       }
     );
@@ -61,32 +63,69 @@ export function validateCheckpoint(
   return { task, currentStep };
 }
 
-export function advanceStep(
+export function advanceSteps(
   repo: GateRepository,
   task: TaskRow,
-  currentStep: StepRow,
-): { nextStep?: CurrentStepInfo; nextStepKey?: string; allStepsCompleted?: boolean; finalKey?: string } {
+  completedStepId: string,
+): {
+  nextSteps?: CurrentStepInfo[];
+  nextStepKeys?: Record<string, string>;
+  allStepsCompleted?: boolean;
+  finalKey?: string;
+} {
   const allSteps = repo.getTaskSteps(task.id);
-  const nextStep = allSteps.find((s) => s.orderIndex === currentStep.orderIndex + 1);
 
-  if (nextStep) {
-    const { plaintext, hash } = generateStepKey();
-    repo.completeAndAdvance(currentStep.id, nextStep.id, hash, task.id, null);
+  // 1. Find all pending steps whose dependencies are all satisfied.
+  //    Treat completedStepId as already completed since it's about to be in the transaction.
+  const unlockedSteps = allSteps.filter(s => {
+    if (s.status !== 'pending') return false;
+    return s.dependsOn.every(depId => {
+      const dep = allSteps.find(x => x.id === depId);
+      if (!dep) return false;
+      return dep.status === 'completed' || dep.id === completedStepId;
+    });
+  });
+
+  if (unlockedSteps.length > 0) {
+    // Generate keys for newly activated steps
+    const nextStepKeys: Record<string, string> = {};
+    const nextKeyHashes: string[] = [];
+    for (const step of unlockedSteps) {
+      const { plaintext, hash } = generateStepKey();
+      nextStepKeys[step.id] = plaintext;
+      nextKeyHashes.push(hash);
+    }
+
+    repo.completeAndAdvance(
+      completedStepId,
+      unlockedSteps.map(s => s.id),
+      nextKeyHashes,
+      task.id,
+      null
+    );
+
     return {
-      nextStep: {
-        stepId: nextStep.id,
-        path: nextStep.path,
-        index: nextStep.orderIndex,
+      nextSteps: unlockedSteps.map(s => ({
+        stepId: s.id,
+        path: s.path,
+        index: s.orderIndex,
         total: task.totalSteps,
-      },
-      nextStepKey: plaintext,
+      })),
+      nextStepKeys,
     };
   }
 
-  const { plaintext, hash } = generateFinalKey();
-  repo.completeAndAdvance(currentStep.id, null, null, task.id, hash);
-  return {
-    allStepsCompleted: true,
-    finalKey: plaintext,
-  };
+  // 2. No pending steps unlocked → check if everything is completed
+  const allCompleted = allSteps.every(s => s.status === 'completed' || s.id === completedStepId);
+  if (allCompleted) {
+    const { plaintext, hash } = generateFinalKey();
+    repo.completeAndAdvance(completedStepId, [], [], task.id, hash);
+    return { allStepsCompleted: true, finalKey: plaintext };
+  }
+
+  // 3. There are pending steps but their dependencies aren't satisfied yet.
+  //    This happens when completing a parallel branch — other branches are still running.
+  //    Just complete this step without activating anything new.
+  repo.completeAndAdvance(completedStepId, [], [], task.id, null);
+  return {};
 }

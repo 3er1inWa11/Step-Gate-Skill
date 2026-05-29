@@ -1,13 +1,12 @@
 // ============================================================================
 // Agent Step Gate — gate_current MCP Tool
-// Phase 1 MVP: Query the current step that should be executed.
-// Does NOT return step_key — keys are only revealed once on creation.
+// Phase 2: Returns ALL current steps (DAG supports multiple active steps).
 // ============================================================================
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { GateCurrentInput, GateCurrentOutput } from '../types/index.js';
-import { getTask, getCurrentStep } from '../storage/repository.js';
+import { getTask, getCurrentSteps } from '../storage/repository.js';
 
 // ---------------------------------------------------------------------------
 // Zod schema for input validation
@@ -28,32 +27,23 @@ async function handleCurrent(params: GateCurrentInput): Promise<GateCurrentOutpu
     return {
       taskId: params.taskId,
       status: 'not_found',
-      currentStep: null,
+      currentSteps: [],
     };
   }
 
-  // 2. Get current step
-  const currentStep = getCurrentStep(params.taskId);
-
-  if (!currentStep) {
-    // No current step — all steps completed or task has no active step
-    return {
-      taskId: params.taskId,
-      status: task.status,
-      currentStep: null,
-    };
-  }
+  // 2. Get all current steps
+  const currentSteps = getCurrentSteps(params.taskId);
 
   // 3. Return current step info (do NOT return step_key — security design)
   return {
     taskId: params.taskId,
     status: task.status,
-    currentStep: {
-      stepId: currentStep.id,
-      path: currentStep.path,
-      index: currentStep.orderIndex,
+    currentSteps: currentSteps.map(cs => ({
+      stepId: cs.id,
+      path: cs.path,
+      index: cs.orderIndex,
       total: task.totalSteps,
-    },
+    })),
   };
 }
 
@@ -64,7 +54,7 @@ async function handleCurrent(params: GateCurrentInput): Promise<GateCurrentOutpu
 export function registerCurrent(server: McpServer): void {
   server.tool(
     'gate_current',
-    "Query the current step that should be executed. Does NOT return step_key for security. Keys are only revealed on first creation (gate_start_plan) or rotation (gate_checkpoint).",
+    "Query all current steps for a task. Does NOT return step_keys for security. Keys are only revealed on creation (gate_start_plan) or rotation (gate_checkpoint).",
     GateCurrentSchema,
     async (args) => {
       const result = await handleCurrent(args);

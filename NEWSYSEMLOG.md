@@ -231,3 +231,19 @@
 **验证**
 - `npx tsc --noEmit`：零错误
 - `npx vitest run`：91/91 全部通过（30 core + 24 storage + 22 tools + 15 CI blackbox）
+
+---
+
+### Bug Fix — 测试中硬编码 'step_N' ID 适配新 ID 格式 (2026-05-29)
+
+**问题**：`src/core/plan.ts` 已将 auto-generated step ID 格式从 `step_${counter}` 改为 `${taskId}_step_${counter}`，确保多任务不冲突。但 `tests/tools.test.ts` 和 `tests/core.test.ts` 中所有硬编码 `'step_1'` / `'step_2'` / `'step_3'` 等字面量未同步更新，导致测试失败。
+
+**修复**：
+- `tests/tools.test.ts`：所有 `'step_N'` 硬编码替换为 `steps[N-1].id`（从 `simulateStartPlan` 返回值获取实际 ID）
+  - 新增 `firstStepId` 解构用于首步断言
+  - `stepKeys['step_N']` 替换为 `stepKeys[steps[N-1].id]`
+  - `nextStepKeys!['step_N']` 替换为 `nextStepKeys![steps[N-1].id]`
+- `tests/core.test.ts`：flattenPlan auto-serial 测试的 ID 断言从 `.toBe('step_N')` 改为 `.toMatch(/_step_N$/)`；dependsOn 断言从 `toEqual(['step_N'])` 改为 `toEqual([result[N-1].id])`
+
+**影响文件**：`tests/tools.test.ts`, `tests/core.test.ts`
+**测试**：110/110 全部通过（36 core + 34 storage + 25 tools + 15 CI blackbox）

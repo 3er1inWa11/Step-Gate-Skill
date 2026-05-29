@@ -1,33 +1,43 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { getActiveTask, getCurrentStep } from '../storage/repository.js';
+import { getActiveTasks, getCurrentSteps, getTaskSteps } from '../storage/repository.js';
 
 export function registerActiveTask(server: McpServer): void {
   server.tool(
     'gate_active_task',
-    'Check if there is an active Step Gate task. Returns hasActiveTask=true with taskId and currentStep if one exists. If no active task, returns hasActiveTask=false. Stop Hooks use this to determine whether to call gate_finalize.',
+    'List all active Step Gate tasks. Returns each task with its currentSteps. Stop Hooks use this to determine whether to call gate_finalize.',
     {},
     async () => {
-      const task = getActiveTask();
+      const tasks = getActiveTasks();
 
-      if (!task) {
+      if (tasks.length === 0) {
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ hasActiveTask: false }) }],
+          content: [{ type: 'text' as const, text: JSON.stringify({ activeTasks: [] }) }],
         };
       }
 
-      const cs = getCurrentStep(task.id);
-      const currentStepInfo = cs ? {
-        stepId: cs.id,
-        path: cs.path,
-        index: cs.orderIndex,
-        total: task.totalSteps,
-      } : null;
+      const activeTasks = tasks.map(task => {
+        const allSteps = getTaskSteps(task.id);
+        const currentSteps = allSteps
+          .filter(s => s.status === 'current')
+          .map(s => ({
+            stepId: s.id,
+            path: s.path,
+            index: s.orderIndex,
+            total: task.totalSteps,
+          }));
+
+        return {
+          taskId: task.id,
+          title: task.title,
+          status: task.status,
+          totalSteps: task.totalSteps,
+          completedSteps: allSteps.filter(s => s.status === 'completed').length,
+          currentSteps,
+        };
+      });
 
       return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({ hasActiveTask: true, taskId: task.id, currentStep: currentStepInfo }),
-        }],
+        content: [{ type: 'text' as const, text: JSON.stringify({ activeTasks }) }],
       };
     },
   );
