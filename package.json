@@ -15,7 +15,16 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "keywords": ["agent", "orchestration", "mcp", "step-gate", "dag", "multi-agent"],
+  "repository": "github:3er1inWa11/Step-Gate-Skill",
+  "homepage": "https://github.com/3er1inWa11/Step-Gate-Skill#readme",
+  "keywords": ["agent", "orchestration", "step-gate", "dag", "multi-agent", "skill", "checkpoint"],
+  "files": [
+    "dist/",
+    "scripts/",
+    "SKILL.md",
+    "Weaver.md",
+    "ARCHITECTURE.md"
+  ],
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
