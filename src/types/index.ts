@@ -13,6 +13,10 @@ export interface PlanNode {
   title: string;
   children?: PlanNode[];
   dependsOn?: string[];
+  /** Old key proving this step was completed in a previous task */
+  skipKey?: string;
+  /** The taskId from the previous (cancelled) task where skipKey was used */
+  skipTaskId?: string;
 }
 
 /** Leaf step after flattening the nested plan (one row in steps table) */
@@ -24,7 +28,7 @@ export interface LeafStep {
   path: string;
   orderIndex: number;
   dependsOn: string[];
-  status: 'pending' | 'current' | 'completed';
+  status: 'pending' | 'current' | 'completed' | 'skipped';
   completedAt: string | null;
   createdAt: string;
 }
@@ -41,6 +45,7 @@ export interface TaskRow {
   currentIndex: number;
   totalSteps: number;
   finalKeyHash: string | null;
+  sessionId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -54,7 +59,7 @@ export interface StepRow {
   path: string;
   orderIndex: number;
   dependsOn: string[];
-  status: 'pending' | 'current' | 'completed';
+  status: 'pending' | 'current' | 'completed' | 'skipped';
   stepKeyHash: string | null;
   completedAt: string | null;
   createdAt: string;
@@ -94,6 +99,7 @@ export interface GateStartPlanInput {
 export interface GateStartPlanOutput {
   taskId: string;
   status: 'active';
+  sessionId: string;
   currentSteps: CurrentStepInfo[];
   stepKeys: Record<string, string>;
 }
@@ -128,7 +134,7 @@ export interface GateCheckpointOutput {
   nextSteps?: CurrentStepInfo[];
   nextStepKeys?: Record<string, string>;
   allStepsCompleted?: boolean;
-  finalKey?: string;
+  taskKey?: string;
   error?: string;
   message?: string;
   currentStep?: CurrentStepInfo;
@@ -141,7 +147,7 @@ export interface GateCheckpointOutput {
 
 export interface GateFinalizeInput {
   taskId: string;
-  finalKey: string;
+  taskKey: string;
 }
 
 export interface GateFinalizeOutput {
@@ -150,6 +156,8 @@ export interface GateFinalizeOutput {
   message?: string;
   currentStep?: CurrentStepInfo;
   pendingSteps?: CurrentStepInfo[];
+  nodeCompleted?: { nodeId: string; programId: string; nodeKey: string };
+  programCompleted?: { programId: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +165,7 @@ export interface GateFinalizeOutput {
 // ---------------------------------------------------------------------------
 
 export interface GateActiveTaskOutput {
+  sessionId: string;
   activeTasks: Array<{
     taskId: string;
     title: string;

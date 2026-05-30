@@ -132,10 +132,10 @@ describe('flattenPlan', () => {
 
     const result = flattenPlan(nodes, 'task-explicit');
 
-    expect(result[0].id).toBe('init');
-    expect(result[1].id).toBe('type');
+    expect(result[0].id).toBe('task-explicit_init');
+    expect(result[1].id).toBe('task-explicit_type');
     // Auto-serial: type depends on init (no explicit dependsOn)
-    expect(result[1].dependsOn).toEqual(['init']);
+    expect(result[1].dependsOn).toEqual(['task-explicit_init']);
   });
 
   it('respects explicit dependsOn over auto-serial', () => {
@@ -148,8 +148,8 @@ describe('flattenPlan', () => {
     const result = flattenPlan(nodes, 'task-deps');
 
     expect(result[0].dependsOn).toEqual([]);
-    expect(result[1].dependsOn).toEqual(['a']);
-    expect(result[2].dependsOn).toEqual(['b']);
+    expect(result[1].dependsOn).toEqual(['task-deps_a']);
+    expect(result[2].dependsOn).toEqual(['task-deps_b']);
   });
 
   it('supports DAG with parallel branches', () => {
@@ -164,9 +164,9 @@ describe('flattenPlan', () => {
 
     expect(result).toHaveLength(4);
     expect(result[0].dependsOn).toEqual([]);  // init: no deps
-    expect(result[1].dependsOn).toEqual(['init']); // modA
-    expect(result[2].dependsOn).toEqual(['init']); // modB
-    expect(result[3].dependsOn).toEqual(['modA', 'modB']); // integrate
+    expect(result[1].dependsOn).toEqual(['task-dag_init']); // modA
+    expect(result[2].dependsOn).toEqual(['task-dag_init']); // modB
+    expect(result[3].dependsOn).toEqual(['task-dag_modA', 'task-dag_modB']); // integrate
   });
 
   it('handles flat plan (no nesting) with auto serial', () => {
@@ -284,6 +284,179 @@ describe('flattenPlan', () => {
       ];
 
       expect(() => flattenPlan(nodes, 'task-10')).toThrow(GateError);
+    });
+
+    // F1: cycle detection
+    it('detects simple 3-node cycle', () => {
+      const nodes: PlanNode[] = [
+        { id: 'a', title: 'Step A', dependsOn: ['c'] },
+        { id: 'b', title: 'Step B', dependsOn: ['a'] },
+        { id: 'c', title: 'Step C', dependsOn: ['b'] },
+      ];
+
+      expect(() => flattenPlan(nodes, 'task-cycle')).toThrow(GateError);
+      try {
+        flattenPlan(nodes, 'task-cycle');
+      } catch (e) {
+        expect(e).toBeInstanceOf(GateError);
+        expect((e as GateError).code).toBe(GateErrorCode.PLAN_SCHEMA_INVALID);
+        expect((e as GateError).message).toMatch(/Circular dependency/);
+      }
+    });
+
+    it('detects self-referencing node', () => {
+      const nodes: PlanNode[] = [
+        { id: 'a', title: 'Step A', dependsOn: ['a'] },
+      ];
+
+      expect(() => flattenPlan(nodes, 'task-self')).toThrow(GateError);
+      try {
+        flattenPlan(nodes, 'task-self');
+      } catch (e) {
+        expect(e).toBeInstanceOf(GateError);
+        expect((e as GateError).code).toBe(GateErrorCode.PLAN_SCHEMA_INVALID);
+        expect((e as GateError).message).toMatch(/Circular dependency/);
+      }
+    });
+
+    it('detects cycle through container expansion', () => {
+      const nodes: PlanNode[] = [
+        {
+          id: 'setup',
+          title: 'Setup',
+          dependsOn: ['test'],
+          children: [
+            { id: 'db', title: 'DB' },
+            { id: 'api', title: 'API' },
+          ],
+        },
+        { id: 'test', title: 'Test', dependsOn: ['setup'] },
+      ];
+
+      expect(() => flattenPlan(nodes, 'task-container-cycle')).toThrow(GateError);
+      try {
+        flattenPlan(nodes, 'task-container-cycle');
+      } catch (e) {
+        expect(e).toBeInstanceOf(GateError);
+        expect((e as GateError).code).toBe(GateErrorCode.PLAN_SCHEMA_INVALID);
+        expect((e as GateError).message).toMatch(/Circular dependency/);
+      }
+    });
+
+    it('does not flag a valid DAG as cyclic', () => {
+      const nodes: PlanNode[] = [
+        { id: 'init', title: 'Init' },
+        { id: 'modA', title: 'Module A', dependsOn: ['init'] },
+        { id: 'modB', title: 'Module B', dependsOn: ['init'] },
+        { id: 'integrate', title: 'Integrate', dependsOn: ['modA', 'modB'] },
+      ];
+
+      const result = flattenPlan(nodes, 'task-dag-nocycle');
+      expect(result).toHaveLength(4);
+    });
+  });
+
+  // F3b: parent dependsOn propagation
+  describe('F3b parent dependsOn propagation', () => {
+    it('propagates parent dependsOn to children', () => {
+      const nodes: PlanNode[] = [
+        {
+          id: 'parent',
+          title: 'Parent',
+          dependsOn: ['other'],
+          children: [
+            { id: 'c1', title: 'Child 1' },
+            { id: 'c2', title: 'Child 2' },
+          ],
+        },
+        { id: 'other', title: 'Other', dependsOn: [] },
+      ];
+
+      const result = flattenPlan(nodes, 'task-f3b');
+
+      // c1 should depend on other
+      const c1 = result.find(r => r.id === 'task-f3b_c1')!;
+      expect(c1.dependsOn).toContain('task-f3b_other');
+
+      // c2 should also depend on other
+      const c2 = result.find(r => r.id === 'task-f3b_c2')!;
+      expect(c2.dependsOn).toContain('task-f3b_other');
+
+      // other has explicit empty deps
+      const other = result.find(r => r.id === 'task-f3b_other')!;
+      expect(other.dependsOn).toEqual([]);
+    });
+
+    it('merges parent and child dependsOn', () => {
+      const nodes: PlanNode[] = [
+        {
+          id: 'container',
+          title: 'Container',
+          dependsOn: ['init'],
+          children: [
+            { id: 'task', title: 'Task', dependsOn: ['config'] },
+          ],
+        },
+        { id: 'init', title: 'Init' },
+        { id: 'config', title: 'Config' },
+      ];
+
+      const result = flattenPlan(nodes, 'task-merge');
+
+      // task should depend on BOTH init (inherited) and config (own)
+      const task = result.find(r => r.id === 'task-merge_task')!;
+      expect(task.dependsOn).toContain('task-merge_init');
+      expect(task.dependsOn).toContain('task-merge_config');
+    });
+
+    it('propagates through multiple nesting levels', () => {
+      const nodes: PlanNode[] = [
+        {
+          id: 'l1',
+          title: 'Level 1',
+          dependsOn: ['prereq'],
+          children: [
+            {
+              id: 'l2',
+              title: 'Level 2',
+              dependsOn: ['setup'],
+              children: [
+                { id: 'leaf', title: 'Leaf' },
+              ],
+            },
+          ],
+        },
+        { id: 'prereq', title: 'Prereq' },
+        { id: 'setup', title: 'Setup' },
+      ];
+
+      const result = flattenPlan(nodes, 'task-deep');
+
+      // leaf should inherit deps from BOTH l1 and l2
+      const leaf = result.find(r => r.id === 'task-deep_leaf')!;
+      expect(leaf.dependsOn).toContain('task-deep_prereq');
+      expect(leaf.dependsOn).toContain('task-deep_setup');
+    });
+
+    it('empty dependsOn on parent does not affect child auto-serial', () => {
+      const nodes: PlanNode[] = [
+        {
+          id: 'p',
+          title: 'Parent',
+          dependsOn: [],
+          children: [
+            { title: 'Child A' },
+            { title: 'Child B' },
+          ],
+        },
+      ];
+
+      const result = flattenPlan(nodes, 'task-empty-inherit');
+
+      expect(result).toHaveLength(2);
+      // Children should auto-serialize since parent had empty deps and no own deps
+      expect(result[0].dependsOn).toEqual([]);
+      expect(result[1].dependsOn).toEqual([result[0].id]);
     });
   });
 });
@@ -555,7 +728,7 @@ describe('advanceSteps', () => {
     expect(result.allStepsCompleted).toBeUndefined();
   });
 
-  it('returns finalKey when last step completes all', () => {
+  it('returns taskKey when last step completes all', () => {
     const step1 = makeStep({ id: 'step-2', orderIndex: 2, dependsOn: [], status: 'current' });
     const task = makeTask({ totalSteps: 2 });
 
@@ -578,8 +751,8 @@ describe('advanceSteps', () => {
 
     expect(repo.completeAndAdvance).toHaveBeenCalledWith('step-2', [], [], 'task-1', expect.any(String));
     expect(result.allStepsCompleted).toBe(true);
-    expect(result.finalKey).toBeDefined();
-    expect(result.finalKey).toMatch(/^[A-Z0-9]{6}$/);
+    expect(result.taskKey).toBeDefined();
+    expect(result.taskKey).toMatch(/^[A-Z0-9]{6}$/);
   });
 
   it('activates unlocked step in simple serial case', () => {

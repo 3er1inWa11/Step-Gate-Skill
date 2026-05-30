@@ -1,17 +1,24 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getActiveTasks, getCurrentSteps, getTaskSteps } from '../storage/repository.js';
 
-export function registerActiveTask(server: McpServer): void {
+export function registerActiveTask(server: McpServer, getSessionId: () => string | null): void {
   server.tool(
     'gate_active_task',
-    'List all active Step Gate tasks. Returns each task with its currentSteps. Stop Hooks use this to determine whether to call gate_finalize.',
+    'List all active Step Gate tasks for the current session. Returns each task with its currentSteps. Stop Hooks use this to determine whether to call gate_finalize.',
     {},
     async () => {
-      const tasks = getActiveTasks();
+      const sessionId = getSessionId();
+      // Fail closed: without a session, return empty (don't leak other sessions' tasks)
+      if (!sessionId) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ sessionId: '', activeTasks: [] }) }],
+        };
+      }
+      const tasks = getActiveTasks(sessionId);
 
       if (tasks.length === 0) {
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ activeTasks: [] }) }],
+          content: [{ type: 'text' as const, text: JSON.stringify({ sessionId, activeTasks: [] }) }],
         };
       }
 
@@ -37,7 +44,7 @@ export function registerActiveTask(server: McpServer): void {
       });
 
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ activeTasks }) }],
+        content: [{ type: 'text' as const, text: JSON.stringify({ sessionId, activeTasks }) }],
       };
     },
   );

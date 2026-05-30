@@ -23,6 +23,7 @@ function mapTaskRow(row: Record<string, unknown>): TaskRow {
     currentIndex: row.current_index as number,
     totalSteps: row.total_steps as number,
     finalKeyHash: (row.final_key_hash as string) ?? null,
+    sessionId: (row.session_id as string) ?? null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -68,8 +69,8 @@ export function createTask(task: TaskRow, steps: StepRow[]): void {
   }
 
   const insertTask = db.prepare(`
-    INSERT INTO tasks (id, title, status, current_index, total_steps, final_key_hash, created_at, updated_at)
-    VALUES (@id, @title, @status, @currentIndex, @totalSteps, @finalKeyHash, @createdAt, @updatedAt)
+    INSERT INTO tasks (id, title, status, current_index, total_steps, final_key_hash, session_id, created_at, updated_at)
+    VALUES (@id, @title, @status, @currentIndex, @totalSteps, @finalKeyHash, @sessionId, @createdAt, @updatedAt)
   `);
 
   const insertStep = db.prepare(`
@@ -85,6 +86,7 @@ export function createTask(task: TaskRow, steps: StepRow[]): void {
       currentIndex: task.currentIndex,
       totalSteps: task.totalSteps,
       finalKeyHash: task.finalKeyHash,
+      sessionId: task.sessionId ?? null,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
     });
@@ -218,7 +220,7 @@ export function completeStep(stepId: string): void {
   try {
     const result = db
       .prepare(
-        "UPDATE steps SET status = 'completed', step_key_hash = NULL, completed_at = ? WHERE id = ?",
+        "UPDATE steps SET status = 'completed', completed_at = ? WHERE id = ?",
       )
       .run(now(), stepId);
     if (result.changes === 0) {
@@ -318,11 +320,12 @@ export function verifyStepKey(
     return false;
   }
   try {
+    const hashed = sha256(keyPlaintext);
     const step = db
-      .prepare('SELECT step_key_hash FROM steps WHERE task_id = ? AND id = ?')
-      .get(taskId, stepId) as { step_key_hash: string | null } | undefined;
-    if (!step || !step.step_key_hash) return false;
-    return sha256(keyPlaintext) === step.step_key_hash;
+      .prepare("SELECT step_key_hash FROM steps WHERE task_id = ? AND id = ? AND status = 'current' AND step_key_hash = ?")
+      .get(taskId, stepId, hashed) as { step_key_hash: string | null } | undefined;
+    if (!step) return false;
+    return true;
   } catch {
     return false;
   }
@@ -332,7 +335,7 @@ export function verifyStepKey(
 // verifyFinalKey
 // ---------------------------------------------------------------------------
 
-export function verifyFinalKey(taskId: string, keyPlaintext: string): boolean {
+export function verifyTaskKey(taskId: string, keyPlaintext: string): boolean {
   if (!taskId || !keyPlaintext) {
     return false;
   }
@@ -347,13 +350,18 @@ export function verifyFinalKey(taskId: string, keyPlaintext: string): boolean {
   }
 }
 
+/** @deprecated use verifyTaskKey */
+export const verifyFinalKey = verifyTaskKey;
+
 // ---------------------------------------------------------------------------
 // getActiveTasks — all tasks with status='active'
 // ---------------------------------------------------------------------------
 
-export function getActiveTasks(): TaskRow[] {
+export function getActiveTasks(sessionId?: string): TaskRow[] {
   try {
-    const rows = db.prepare("SELECT * FROM tasks WHERE status = 'active'").all() as Record<string, unknown>[];
+    const rows = sessionId
+      ? (db.prepare("SELECT * FROM tasks WHERE status = 'active' AND session_id = ?").all(sessionId) as Record<string, unknown>[])
+      : (db.prepare("SELECT * FROM tasks WHERE status = 'active'").all() as Record<string, unknown>[]);
     return rows.map(mapTaskRow);
   } catch (err) {
     throw new GateError(
@@ -383,8 +391,25 @@ export function getActiveTask(): TaskRow | undefined {
 // cancelTask
 // ---------------------------------------------------------------------------
 
-export function cancelTask(taskId: string): void {
-  updateTaskStatus(taskId, 'cancelled');
+export function cancelTask(taskId: string, sessionId: string): void {
+  if (!taskId || !sessionId) {
+    throw new GateError(GateErrorCode.TASK_NOT_FOUND, 'taskId and sessionId are required');
+  }
+  try {
+    const result = db
+      .prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND session_id = ? AND status = ?')
+      .run('cancelled', now(), taskId, sessionId, 'active');
+    if (result.changes === 0) {
+      throw new GateError(GateErrorCode.TASK_NOT_FOUND, `Task not found or not owned by this session: ${taskId}`);
+    }
+    addEvent(taskId, null, 'task_cancelled');
+  } catch (err) {
+    if (err instanceof GateError) throw err;
+    throw new GateError(
+      GateErrorCode.INTERNAL_ERROR,
+      `Failed to cancel task: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -424,9 +449,13 @@ export function completeAndAdvance(
   finalKeyHash: string | null,
 ): void {
   const transaction = db.transaction(() => {
-    // Complete current step
-    db.prepare("UPDATE steps SET status = 'completed', step_key_hash = NULL, completed_at = ? WHERE id = ?")
-      .run(now(), completedStepId);
+    // Complete current step — strict WHERE prevents double-consumption
+    const result = db.prepare(
+      "UPDATE steps SET status = 'completed', completed_at = ? WHERE id = ? AND task_id = ? AND status = 'current'"
+    ).run(now(), completedStepId, taskId);
+    if (result.changes === 0) {
+      throw new GateError(GateErrorCode.INVALID_CURRENT_STEP, `Step not in current state or not found: ${completedStepId}`);
+    }
     db.prepare("INSERT INTO events (id, task_id, step_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(randomUUID(), taskId, completedStepId, 'step_completed', null, now());
 
@@ -460,6 +489,35 @@ export function completeAndAdvance(
       `Failed to advance step: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// verifySkipKey — proves a step was genuinely completed (for skip on rebuild)
+// ---------------------------------------------------------------------------
+
+export function verifySkipKey(oldTaskId: string, stepId: string, oldKey: string): boolean {
+  if (!oldTaskId || !stepId || !oldKey) return false;
+  try {
+    // Reject if this key has already been consumed (one-time use)
+    const consumed = db.prepare(
+      "SELECT 1 FROM events WHERE task_id = ? AND step_id = ? AND event_type = 'skip_key_consumed'"
+    ).get(oldTaskId, stepId);
+    if (consumed) return false;
+
+    const step = db.prepare(
+      "SELECT step_key_hash, status FROM steps WHERE task_id = ? AND id = ?"
+    ).get(oldTaskId, stepId) as { step_key_hash: string | null; status: string } | undefined;
+    if (!step || !step.step_key_hash) return false;
+    if (step.status !== 'completed') return false;
+    return sha256(oldKey) === step.step_key_hash;
+  } catch {
+    return false;
+  }
+}
+
+/** Record that a skipKey has been consumed — prevents unlimited reuse (B1 fix) */
+export function recordSkipConsumed(taskId: string, stepId: string): void {
+  addEvent(taskId, stepId, 'skip_key_consumed');
 }
 
 // ---------------------------------------------------------------------------

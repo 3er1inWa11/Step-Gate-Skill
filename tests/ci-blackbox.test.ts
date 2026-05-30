@@ -240,7 +240,7 @@ describe('CI Black-Box: MCP Protocol Level', () => {
   let stepKey1: string;
   let stepId2: string;  // returned stepId (UUID) for second leaf
   let stepKey2: string;
-  let finalKey: string;
+  let taskKey: string;
 
   // ── beforeAll / afterAll ──────────────────────────────────────────────
 
@@ -277,7 +277,7 @@ describe('CI Black-Box: MCP Protocol Level', () => {
   // 0. Server liveness -- tools/list
   // ═════════════════════════════════════════════════════════════════════
 
-  it('0. tools/list 返回 5 个工具 (含 gate_active_task)', async () => {
+  it('0. tools/list 返回 6 个工具 (含 gate_active_task + gate_cancel_task)', async () => {
     const result = await client.request('tools/list');
     expect(result).toBeDefined();
     expect(Array.isArray(result.tools)).toBe(true);
@@ -285,6 +285,7 @@ describe('CI Black-Box: MCP Protocol Level', () => {
     const names: string[] = result.tools.map((t: any) => t.name).sort();
     expect(names).toEqual([
       'gate_active_task',
+      'gate_cancel_task',
       'gate_checkpoint',
       'gate_current',
       'gate_finalize',
@@ -313,21 +314,24 @@ describe('CI Black-Box: MCP Protocol Level', () => {
     expect(result.status).toBe('active');
     expect(result._isError).toBe(false);
 
-    // Current step -- should be first leaf
-    const cs = result.currentStep as Record<string, unknown> | undefined;
-    expect(cs).toBeDefined();
+    // Current steps (DAG v2: array, supports multiple parallel)
+    const currentSteps = result.currentSteps as any[] | undefined;
+    expect(currentSteps).toBeDefined();
+    expect(currentSteps!.length).toBe(1);
+    const cs = currentSteps![0];
     // stepId is a server-generated UUID
-    expect(typeof cs!.stepId).toBe('string');
-    stepId1 = cs!.stepId as string;
-    expect(cs!.path).toContain('Child One');
-    expect(cs!.index).toBe(1);
-    expect(cs!.total).toBe(3);
+    expect(typeof cs.stepId).toBe('string');
+    stepId1 = cs.stepId as string;
+    expect(cs.path).toContain('Child One');
+    expect(cs.index).toBe(1);
+    expect(cs.total).toBe(3);
 
-    // Step key
-    expect(result.stepKey).toBeDefined();
-    expect(typeof result.stepKey).toBe('string');
-    expect(result.stepKey as string).toMatch(/^[A-Z0-9]{6}$/);
-    stepKey1 = result.stepKey as string;
+    // Step keys (DAG v2: object keyed by stepId)
+    const stepKeys = result.stepKeys as Record<string, string> | undefined;
+    expect(stepKeys).toBeDefined();
+    stepKey1 = stepKeys![stepId1];
+    expect(typeof stepKey1).toBe('string');
+    expect(stepKey1).toMatch(/^[A-Z0-9]{6}$/);
   });
 
   // ═════════════════════════════════════════════════════════════════════
@@ -341,14 +345,16 @@ describe('CI Black-Box: MCP Protocol Level', () => {
     expect(result.status).toBe('active');
     expect(result._isError).toBe(false);
 
-    const cs = result.currentStep as Record<string, unknown> | undefined;
-    expect(cs).toBeDefined();
-    expect(cs!.stepId).toBe(stepId1);
-    expect(cs!.index).toBe(1);
-    expect(cs!.total).toBe(3);
+    const currentSteps = result.currentSteps as any[] | undefined;
+    expect(currentSteps).toBeDefined();
+    expect(currentSteps!.length).toBe(1);
+    const cs = currentSteps![0];
+    expect(cs.stepId).toBe(stepId1);
+    expect(cs.index).toBe(1);
+    expect(cs.total).toBe(3);
 
-    // Security: stepKey must NOT leak on query
-    expect(result.stepKey).toBeUndefined();
+    // Security: stepKeys must NOT leak on query
+    expect(result.stepKeys).toBeUndefined();
   });
 
   // ═════════════════════════════════════════════════════════════════════
@@ -365,19 +371,22 @@ describe('CI Black-Box: MCP Protocol Level', () => {
     expect(result.accepted).toBe(true);
     expect(result._isError).toBe(false);
 
-    // Next step
-    const ns = result.nextStep as Record<string, unknown> | undefined;
-    expect(ns).toBeDefined();
-    expect(ns!.stepId).toBeDefined();
-    stepId2 = ns!.stepId as string;
-    expect(ns!.path).toContain('Child Two');
+    // Next steps (DAG v2: array)
+    const nextSteps = result.nextSteps as any[] | undefined;
+    expect(nextSteps).toBeDefined();
+    expect(nextSteps!.length).toBe(1);
+    const ns = nextSteps![0];
+    expect(ns.stepId).toBeDefined();
+    stepId2 = ns.stepId as string;
+    expect(ns.path).toContain('Child Two');
 
-    // Next key must differ
-    expect(result.nextStepKey).toBeDefined();
-    expect(typeof result.nextStepKey).toBe('string');
-    expect(result.nextStepKey as string).toMatch(/^[A-Z0-9]{6}$/);
-    expect(result.nextStepKey).not.toBe(stepKey1);
-    stepKey2 = result.nextStepKey as string;
+    // Next keys (DAG v2: object keyed by stepId)
+    const nextStepKeys = result.nextStepKeys as Record<string, string> | undefined;
+    expect(nextStepKeys).toBeDefined();
+    stepKey2 = nextStepKeys![stepId2];
+    expect(typeof stepKey2).toBe('string');
+    expect(stepKey2).toMatch(/^[A-Z0-9]{6}$/);
+    expect(stepKey2).not.toBe(stepKey1);
   });
 
   // ═════════════════════════════════════════════════════════════════════
@@ -418,10 +427,10 @@ describe('CI Black-Box: MCP Protocol Level', () => {
   });
 
   // ═════════════════════════════════════════════════════════════════════
-  // 6. All steps completed -> finalKey
+  // 6. All steps completed -> taskKey
   // ═════════════════════════════════════════════════════════════════════
 
-  it('6. 所有步骤完成后获得 finalKey', async () => {
+  it('6. 所有步骤完成后获得 taskKey', async () => {
     // Advance from step 2 (child-2) to step 3 (final)
     const mid = await client.callTool('gate_checkpoint', {
       taskId: taskId,
@@ -432,22 +441,18 @@ describe('CI Black-Box: MCP Protocol Level', () => {
     expect(mid.accepted).toBe(true);
     expect(mid._isError).toBe(false);
 
-    // mid.nextStepKey is the key for step 3 (final)
-    const stepKey3 = mid.nextStepKey as string;
+    // mid.nextStepKeys is an object keyed by stepId
+    const midNextStepKeys = mid.nextStepKeys as Record<string, string> | undefined;
+    expect(midNextStepKeys).toBeDefined();
+    const midNextSteps = mid.nextSteps as any[];
+    expect(midNextSteps).toBeDefined();
+    const stepKey3 = midNextStepKeys![midNextSteps[0].stepId];
     expect(stepKey3).toMatch(/^[A-Z0-9]{6}$/);
 
-    // Query gate_current to get the UUID for the final step
-    const current = await client.callTool('gate_current', { taskId: taskId });
-    const finalStepId = (current.currentStep as Record<string, unknown>).stepId as string;
-    expect(finalStepId).toBeDefined();
-    const finalStep = current.currentStep as Record<string, unknown>;
-    expect(finalStep.path).toContain('Final');
-    expect(finalStep.index).toBe(3);
-
-    // Now checkpoint the LAST step -> should return finalKey
+    // Now checkpoint the LAST step -> should return taskKey
     const result = await client.callTool('gate_checkpoint', {
       taskId: taskId,
-      stepId: finalStepId,
+      stepId: midNextSteps[0].stepId,
       stepKey: stepKey3,
     });
 
@@ -455,22 +460,22 @@ describe('CI Black-Box: MCP Protocol Level', () => {
     expect(result.allStepsCompleted).toBe(true);
     expect(result._isError).toBe(false);
 
-    expect(result.finalKey).toBeDefined();
-    expect(typeof result.finalKey).toBe('string');
-    expect(result.finalKey as string).toMatch(/^[A-Z0-9]{6}$/);
-    finalKey = result.finalKey as string;
+    expect(result.taskKey).toBeDefined();
+    expect(typeof result.taskKey).toBe('string');
+    expect(result.taskKey as string).toMatch(/^[A-Z0-9]{6}$/);
+    taskKey = result.taskKey as string;
   });
 
   // ═════════════════════════════════════════════════════════════════════
-  // 7. Wrong finalKey -> rejected
+  // 7. Wrong taskKey -> rejected
   // ═════════════════════════════════════════════════════════════════════
 
-  it('7. 用错误 finalKey finalize 失败', async () => {
+  it('7. 用错误 taskKey finalize 失败', async () => {
     const badKey = 'BADKEY';
 
     const result = await client.callTool('gate_finalize', {
       taskId: taskId,
-      finalKey: badKey,
+      taskKey: badKey,
     });
 
     expect(result.accepted).toBe(false);
@@ -478,18 +483,18 @@ describe('CI Black-Box: MCP Protocol Level', () => {
   });
 
   // ═════════════════════════════════════════════════════════════════════
-  // 8. Correct finalKey -> completed
+  // 8. Correct taskKey -> completed
   // ═════════════════════════════════════════════════════════════════════
 
-  it('8. 用正确 finalKey finalize 成功', async () => {
-    // finalKey must be set by test 6
-    if (!finalKey) {
-      console.warn('[CI] SKIP: finalKey not set by test 6');
+  it('8. 用正确 taskKey finalize 成功', async () => {
+    // taskKey must be set by test 6
+    if (!taskKey) {
+      console.warn('[CI] SKIP: taskKey not set by test 6');
       return;
     }
     const result = await client.callTool('gate_finalize', {
       taskId: taskId,
-      finalKey: finalKey,
+      taskKey: taskKey,
     });
 
     expect(result.accepted).toBe(true);

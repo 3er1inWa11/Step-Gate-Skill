@@ -5,3 +5,7 @@ data/
 *.db-shm
 *.db-wal
 .vite/
+.step-gate/
+.obsidian/
+.codegraph/
+.cursor/

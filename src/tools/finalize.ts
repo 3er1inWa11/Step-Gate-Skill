@@ -6,7 +6,8 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { GateFinalizeInput, GateFinalizeOutput } from '../types/index.js';
-import { getTask, getCurrentSteps, getTaskSteps, verifyFinalKey, updateTaskStatus, addEvent } from '../storage/repository.js';
+import { getTask, getCurrentSteps, getTaskSteps, verifyTaskKey, updateTaskStatus, addEvent } from '../storage/repository.js';
+import { commitProgramNode } from '../core/program.js';
 
 // ---------------------------------------------------------------------------
 // Zod input schema
@@ -14,7 +15,7 @@ import { getTask, getCurrentSteps, getTaskSteps, verifyFinalKey, updateTaskStatu
 
 const FinalizeInputSchema = {
   taskId: z.string().describe('The task ID to finalize'),
-  finalKey: z.string().describe('The final_key obtained from the last checkpoint'),
+  taskKey: z.string().describe('The task key obtained from the last checkpoint'),
 };
 
 // ---------------------------------------------------------------------------
@@ -41,13 +42,12 @@ async function handleFinalize(params: GateFinalizeInput): Promise<GateFinalizeOu
     };
   }
 
-  // 3. Verify final_key
-  const isValid = verifyFinalKey(params.taskId, params.finalKey);
+  // 3. Verify task key
+  const isValid = verifyTaskKey(params.taskId, params.taskKey);
   if (!isValid) {
-    // Collect pending steps (all steps not completed)
     const allSteps = getTaskSteps(params.taskId);
     const pendingSteps = allSteps
-      .filter(s => s.status !== 'completed')
+      .filter(s => s.status !== 'completed' && s.status !== 'skipped')
       .map(s => ({
         stepId: s.id,
         path: s.path,
@@ -70,14 +70,29 @@ async function handleFinalize(params: GateFinalizeInput): Promise<GateFinalizeOu
     params.taskId,
     null,
     'task_finalized',
-    JSON.stringify({ finalKeyHash: task.finalKeyHash }),
+    JSON.stringify({ taskKeyHash: task.finalKeyHash }),
   );
 
-  return {
+  const output: GateFinalizeOutput = {
     accepted: true,
     status: 'completed',
     message: 'All planned steps have been checkpointed.',
   };
+
+  // 5. Auto-propagate: check if node is complete
+  if (task.sessionId) {
+    const cr = commitProgramNode(task.sessionId);
+    if (cr) {
+      (output as any).nodeCompleted = { nodeId: cr.nodeId, programId: cr.programId, nodeKey: cr.nodeKey };
+      output.message = 'Task finalized. Node auto-completed (all tasks done).';
+      if (cr.allDone) {
+        (output as any).programCompleted = { programId: cr.programId };
+        output.message = 'Task finalized → Node completed → Program completed.';
+      }
+    }
+  }
+
+  return output;
 }
 
 // ---------------------------------------------------------------------------

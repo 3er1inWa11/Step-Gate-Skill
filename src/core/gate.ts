@@ -1,15 +1,15 @@
 import type { TaskRow, StepRow, CurrentStepInfo } from '../types/index.js';
 import { GateError, GateErrorCode } from './errors.js';
-import { generateStepKey, generateFinalKey, hashKey } from './keys.js';
+import { generateStepKey, generateTaskKey, hashKey } from './keys.js';
 
 export interface GateRepository {
   getTask(taskId: string): TaskRow | undefined;
   getCurrentSteps(taskId: string): StepRow[];
   getTaskSteps(taskId: string): StepRow[];
   getStep(stepId: string): StepRow | undefined;
-  completeAndAdvance(completedStepId: string, nextStepIds: string[], nextKeyHashes: string[], taskId: string, finalKeyHash: string | null): void;
+  completeAndAdvance(completedStepId: string, nextStepIds: string[], nextKeyHashes: string[], taskId: string, taskKeyHash: string | null): void;
   updateTaskStatus(taskId: string, status: string): void;
-  verifyFinalKey(taskId: string, keyPlaintext: string): boolean;
+  verifyTaskKey(taskId: string, keyPlaintext: string): boolean;
 }
 
 export function validateCheckpoint(
@@ -71,7 +71,7 @@ export function advanceSteps(
   nextSteps?: CurrentStepInfo[];
   nextStepKeys?: Record<string, string>;
   allStepsCompleted?: boolean;
-  finalKey?: string;
+  taskKey?: string;
 } {
   const allSteps = repo.getTaskSteps(task.id);
 
@@ -82,7 +82,7 @@ export function advanceSteps(
     return s.dependsOn.every(depId => {
       const dep = allSteps.find(x => x.id === depId);
       if (!dep) return false;
-      return dep.status === 'completed' || dep.id === completedStepId;
+      return dep.status === 'completed' || dep.status === 'skipped' || dep.id === completedStepId;
     });
   });
 
@@ -116,11 +116,11 @@ export function advanceSteps(
   }
 
   // 2. No pending steps unlocked → check if everything is completed
-  const allCompleted = allSteps.every(s => s.status === 'completed' || s.id === completedStepId);
+  const allCompleted = allSteps.every(s => s.status === 'completed' || s.status === 'skipped' || s.id === completedStepId);
   if (allCompleted) {
-    const { plaintext, hash } = generateFinalKey();
+    const { plaintext, hash } = generateTaskKey();
     repo.completeAndAdvance(completedStepId, [], [], task.id, hash);
-    return { allStepsCompleted: true, finalKey: plaintext };
+    return { allStepsCompleted: true, taskKey: plaintext };
   }
 
   // 3. There are pending steps but their dependencies aren't satisfied yet.

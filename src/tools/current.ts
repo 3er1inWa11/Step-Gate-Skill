@@ -20,10 +20,18 @@ const GateCurrentSchema = {
 // Tool handler
 // ---------------------------------------------------------------------------
 
-async function handleCurrent(params: GateCurrentInput): Promise<GateCurrentOutput> {
-  // 1. Get task
+async function handleCurrent(params: GateCurrentInput, sessionId: string): Promise<GateCurrentOutput> {
+  // 1. Get task — enforce session_id isolation
   const task = getTask(params.taskId);
   if (!task) {
+    return {
+      taskId: params.taskId,
+      status: 'not_found',
+      currentSteps: [],
+    };
+  }
+
+  if (task.sessionId && task.sessionId !== sessionId) {
     return {
       taskId: params.taskId,
       status: 'not_found',
@@ -51,13 +59,19 @@ async function handleCurrent(params: GateCurrentInput): Promise<GateCurrentOutpu
 // MCP Tool registration
 // ---------------------------------------------------------------------------
 
-export function registerCurrent(server: McpServer): void {
+export function registerCurrent(server: McpServer, getSessionId: () => string | null): void {
   server.tool(
     'gate_current',
     "Query all current steps for a task. Does NOT return step_keys for security. Keys are only revealed on creation (gate_start_plan) or rotation (gate_checkpoint).",
     GateCurrentSchema,
     async (args) => {
-      const result = await handleCurrent(args);
+      const sessionId = getSessionId();
+      if (!sessionId) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ taskId: args.taskId, status: 'not_found', currentSteps: [] }) }],
+        };
+      }
+      const result = await handleCurrent(args, sessionId);
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result) }],
       };

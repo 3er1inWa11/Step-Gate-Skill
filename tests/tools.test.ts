@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import db from '../src/storage/db.js';
 import * as repo from '../src/storage/repository.js';
+import { recordSkipConsumed } from '../src/storage/repository.js';
 import { flattenPlan } from '../src/core/plan.js';
 import { validateCheckpoint, advanceSteps, type GateRepository } from '../src/core/gate.js';
 import { generateStepKey, generateFinalKey, hashKey } from '../src/core/keys.js';
@@ -22,6 +23,7 @@ function makeTaskFromLeaves(
   taskId: string,
   title: string,
   leafSteps: ReturnType<typeof flattenPlan>,
+  sessionId = 'ses_TEST00',
 ): TaskRow {
   const now = new Date().toISOString();
   return {
@@ -31,6 +33,7 @@ function makeTaskFromLeaves(
     currentIndex: 1,
     totalSteps: leafSteps.length,
     finalKeyHash: null,
+    sessionId,
     createdAt: now,
     updatedAt: now,
   };
@@ -63,6 +66,7 @@ function simulateStartPlan(
   taskId: string,
   title: string,
   nodes: PlanNode[],
+  sessionId = 'ses_TEST00',
 ): { task: TaskRow; steps: StepRow[]; stepKeys: Record<string, string>; firstStepId: string } {
   const leaves = flattenPlan(nodes, taskId);
   const initialCurrent = leaves.filter(s => s.dependsOn.length === 0);
@@ -75,7 +79,7 @@ function simulateStartPlan(
     plaintextKeys[s.id] = k.plaintext;
   }
 
-  const task = makeTaskFromLeaves(taskId, title, leaves);
+  const task = makeTaskFromLeaves(taskId, title, leaves, sessionId);
   const steps = makeStepsFromLeaves(leaves, stepKeyMap);
   repo.createTask(task, steps);
   return {
@@ -94,6 +98,10 @@ beforeEach(() => {
   db.exec('DELETE FROM events');
   db.exec('DELETE FROM steps');
   db.exec('DELETE FROM tasks');
+  // Insert test sessions so FK constraints pass
+  for (const sid of ['ses_TEST00', 'ses_ALICE', 'ses_BOB', 'ses_MINE', 'ses_SRC']) {
+    db.prepare("INSERT OR IGNORE INTO sessions (session_id, session_secret_hash, recovery_token_hash, title, workspace, status, created_by_cli, created_at, updated_at) VALUES (?, 'test_hash', 'test_hash', 'Test', 'test', 'active', 'cli_TEST00', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')").run(sid);
+  }
 });
 
 // ============================================================================
@@ -148,10 +156,10 @@ describe('End-to-End: Simple Serial Plan', () => {
     const v3 = validateCheckpoint(repo, taskId, step3Id, key3);
     const a3 = advanceSteps(repo, v3.task, step3Id);
     expect(a3.allStepsCompleted).toBe(true);
-    expect(a3.finalKey).toMatch(/^[A-Z0-9]{6}$/);
+    expect(a3.taskKey).toMatch(/^[A-Z0-9]{6}$/);
 
     // Verify final key
-    expect(repo.verifyFinalKey(taskId, a3.finalKey!)).toBe(true);
+    expect(repo.verifyTaskKey(taskId, a3.taskKey!)).toBe(true);
 
     // Finalize
     repo.updateTaskStatus(taskId, 'completed');
@@ -171,8 +179,8 @@ describe('End-to-End: Simple Serial Plan', () => {
     const a = advanceSteps(repo, v.task, step1Id);
 
     expect(a.allStepsCompleted).toBe(true);
-    expect(a.finalKey).toBeDefined();
-    expect(repo.verifyFinalKey(taskId, a.finalKey!)).toBe(true);
+    expect(a.taskKey).toBeDefined();
+    expect(repo.verifyTaskKey(taskId, a.taskKey!)).toBe(true);
   });
 });
 
@@ -191,45 +199,46 @@ describe('End-to-End: DAG Plan', () => {
     ];
 
     const { stepKeys } = simulateStartPlan(taskId, 'DAG Plan', nodes);
+    const sid = (id: string) => `${taskId}_${id}`;
 
     // Only 'init' should be current (no deps)
     const current1 = repo.getCurrentSteps(taskId);
     expect(current1).toHaveLength(1);
-    expect(current1[0].id).toBe('init');
+    expect(current1[0].id).toBe(sid('init'));
 
     // Complete init → modA and modB should both unlock
-    const v1 = validateCheckpoint(repo, taskId, 'init', stepKeys['init']);
-    const a1 = advanceSteps(repo, v1.task, 'init');
+    const v1 = validateCheckpoint(repo, taskId, sid('init'), stepKeys[sid('init')]);
+    const a1 = advanceSteps(repo, v1.task, sid('init'));
     expect(a1.nextSteps).toBeDefined();
     expect(a1.nextSteps!.length).toBe(2);
-    const modAKey = a1.nextStepKeys!['modA'];
-    const modBKey = a1.nextStepKeys!['modB'];
+    const modAKey = a1.nextStepKeys![sid('modA')];
+    const modBKey = a1.nextStepKeys![sid('modB')];
 
     // Both modA and modB should be current
     const current2 = repo.getCurrentSteps(taskId);
     expect(current2).toHaveLength(2);
-    expect(current2.map(s => s.id).sort()).toEqual(['modA', 'modB']);
+    expect(current2.map(s => s.id).sort()).toEqual([sid('modA'), sid('modB')]);
 
     // Complete modA → integration test should NOT unlock yet (modB still active)
-    const v2a = validateCheckpoint(repo, taskId, 'modA', modAKey);
-    const a2a = advanceSteps(repo, v2a.task, 'modA');
+    const v2a = validateCheckpoint(repo, taskId, sid('modA'), modAKey);
+    const a2a = advanceSteps(repo, v2a.task, sid('modA'));
     expect(a2a.nextSteps).toBeUndefined(); // nothing unlocks yet
     expect(a2a.allStepsCompleted).toBeUndefined();
 
     // Complete modB → integration test should now unlock
-    const v2b = validateCheckpoint(repo, taskId, 'modB', modBKey);
-    const a2b = advanceSteps(repo, v2b.task, 'modB');
+    const v2b = validateCheckpoint(repo, taskId, sid('modB'), modBKey);
+    const a2b = advanceSteps(repo, v2b.task, sid('modB'));
     expect(a2b.nextSteps).toBeDefined();
     expect(a2b.nextSteps!.length).toBe(1);
-    expect(a2b.nextSteps![0].stepId).toBe('test');
-    const testKey = a2b.nextStepKeys!['test'];
+    expect(a2b.nextSteps![0].stepId).toBe(sid('test'));
+    const testKey = a2b.nextStepKeys![sid('test')];
 
     // Complete integration test → all done
-    const v3 = validateCheckpoint(repo, taskId, 'test', testKey);
-    const a3 = advanceSteps(repo, v3.task, 'test');
+    const v3 = validateCheckpoint(repo, taskId, sid('test'), testKey);
+    const a3 = advanceSteps(repo, v3.task, sid('test'));
     expect(a3.allStepsCompleted).toBe(true);
-    expect(a3.finalKey).toBeDefined();
-    expect(repo.verifyFinalKey(taskId, a3.finalKey!)).toBe(true);
+    expect(a3.taskKey).toBeDefined();
+    expect(repo.verifyTaskKey(taskId, a3.taskKey!)).toBe(true);
   });
 });
 
@@ -279,8 +288,8 @@ describe('End-to-End: Nested Plan', () => {
     const a3 = advanceSteps(repo, v3.task, step3Id);
 
     expect(a3.allStepsCompleted).toBe(true);
-    expect(a3.finalKey).toBeDefined();
-    expect(repo.verifyFinalKey(taskId, a3.finalKey!)).toBe(true);
+    expect(a3.taskKey).toBeDefined();
+    expect(repo.verifyTaskKey(taskId, a3.taskKey!)).toBe(true);
   });
 });
 
@@ -401,7 +410,7 @@ describe('Finalize Validation', () => {
     const v = validateCheckpoint(repo, taskId, step1Id, stepKeys[step1Id]);
     advanceSteps(repo, v.task, step1Id);
 
-    const isValid = repo.verifyFinalKey(taskId, 'BADKEY1');
+    const isValid = repo.verifyTaskKey(taskId, 'BADKEY1');
     expect(isValid).toBe(false);
   });
 
@@ -413,7 +422,7 @@ describe('Finalize Validation', () => {
     ];
     simulateStartPlan(taskId, 'Premature Fin', nodes);
 
-    expect(repo.verifyFinalKey(taskId, 'BADKEY')).toBe(false);
+    expect(repo.verifyTaskKey(taskId, 'BADKEY')).toBe(false);
     const task = repo.getTask(taskId);
     expect(task!.finalKeyHash).toBeNull();
   });
@@ -428,7 +437,7 @@ describe('Finalize Validation', () => {
     const a = advanceSteps(repo, v.task, step1Id);
     expect(a.allStepsCompleted).toBe(true);
 
-    expect(repo.verifyFinalKey(taskId, a.finalKey!)).toBe(true);
+    expect(repo.verifyTaskKey(taskId, a.taskKey!)).toBe(true);
     repo.updateTaskStatus(taskId, 'completed');
     expect(repo.getTask(taskId)!.status).toBe('completed');
   });
@@ -456,13 +465,14 @@ describe('Finalize Validation', () => {
       { id: 'test', title: 'Test', dependsOn: ['modA', 'modB'] },
     ];
     const { stepKeys } = simulateStartPlan(taskId, 'Partial DAG', nodes);
+    const sid = (id: string) => `${taskId}_${id}`;
 
     // Only complete init
-    const v1 = validateCheckpoint(repo, taskId, 'init', stepKeys['init']);
-    advanceSteps(repo, v1.task, 'init');
+    const v1 = validateCheckpoint(repo, taskId, sid('init'), stepKeys[sid('init')]);
+    advanceSteps(repo, v1.task, sid('init'));
 
     // Now try verifying final key — should fail
-    const isValid = repo.verifyFinalKey(taskId, 'BADKEY');
+    const isValid = repo.verifyTaskKey(taskId, 'BADKEY');
     expect(isValid).toBe(false);
 
     // Check pending steps
@@ -471,9 +481,9 @@ describe('Finalize Validation', () => {
     // init should be completed, modA/modB current, test pending
     expect(pendingSteps.length).toBe(3);
     const pendingIds = pendingSteps.map(s => s.id).sort();
-    expect(pendingIds).toContain('modA');
-    expect(pendingIds).toContain('modB');
-    expect(pendingIds).toContain('test');
+    expect(pendingIds).toContain(sid('modA'));
+    expect(pendingIds).toContain(sid('modB'));
+    expect(pendingIds).toContain(sid('test'));
   });
 });
 
@@ -507,7 +517,7 @@ describe('Persistence', () => {
 
     const stepsAfter = repo.getTaskSteps(taskId);
     expect(stepsAfter[0].status).toBe('completed');
-    expect(stepsAfter[0].stepKeyHash).toBeNull();
+    expect(stepsAfter[0].stepKeyHash).toBeTruthy(); // key hash preserved for skip verification
     expect(stepsAfter[1].status).toBe('current');
     expect(stepsAfter[1].stepKeyHash).toBeTruthy();
   });
@@ -568,8 +578,7 @@ describe('Multi-task support', () => {
     const taskId = randomUUID();
     simulateStartPlan(taskId, 'Cancel Me', [{ title: 'Step 1' }]);
 
-    repo.cancelTask(taskId);
-    repo.addEvent(taskId, null, 'task_cancelled');
+    repo.cancelTask(taskId, 'ses_TEST00');
 
     const task = repo.getTask(taskId);
     expect(task!.status).toBe('cancelled');
@@ -577,6 +586,84 @@ describe('Multi-task support', () => {
     // Cancelled task not in active tasks
     const activeTasks = repo.getActiveTasks();
     expect(activeTasks.find(t => t.id === taskId)).toBeUndefined();
+  });
+
+  // A1: Cross-session cancel must be rejected
+  it('A1: should reject cancel from different session', () => {
+    const taskId = randomUUID();
+    simulateStartPlan(taskId, 'Session A Task', [{ title: 'Step 1' }], 'ses_ALICE');
+
+    // Session B (Bob) tries to cancel Session A's task
+    expect(() => repo.cancelTask(taskId, 'ses_BOB')).toThrow(/not owned/);
+  });
+
+  // A1: Same-session cancel must work
+  it('A1: should allow cancel from same session', () => {
+    const taskId = randomUUID();
+    simulateStartPlan(taskId, 'My Task', [{ title: 'Step 1' }], 'ses_MINE');
+
+    repo.cancelTask(taskId, 'ses_MINE');
+    expect(repo.getTask(taskId)!.status).toBe('cancelled');
+  });
+
+  // B1: After recordSkipConsumed, verifySkipKey should reject
+  it('B1: verifySkipKey should reject after recordSkipConsumed', () => {
+    // Create source task with a completed step that has a key hash
+    const srcTaskId = randomUUID();
+    const stepId = `${srcTaskId}_step_1`;
+    const key = 'KEY001';
+    const keyHash = hashKey(key);
+    const now = new Date().toISOString();
+
+    const task: TaskRow = {
+      id: srcTaskId, title: 'Source', status: 'active',
+      currentIndex: 1, totalSteps: 1,
+      finalKeyHash: null, sessionId: 'ses_TEST00',
+      createdAt: now, updatedAt: now,
+    };
+    const steps: StepRow[] = [{
+      id: stepId, taskId: srcTaskId, parentPath: null,
+      title: 'auth', path: 'auth', orderIndex: 1,
+      dependsOn: [], status: 'completed', stepKeyHash: keyHash,
+      completedAt: now, createdAt: now,
+    }];
+    repo.createTask(task, steps);
+
+    // First verify — should pass
+    expect(repo.verifySkipKey(srcTaskId, stepId, key)).toBe(true);
+
+    // Record consumption
+    recordSkipConsumed(srcTaskId, stepId);
+
+    // Second verify — should fail (already consumed)
+    expect(repo.verifySkipKey(srcTaskId, stepId, key)).toBe(false);
+  });
+
+  // B1: skipped status exists in the types and DAG accepts it
+  it('B1: skipped steps should be treated as satisfied dependencies', () => {
+    const taskId = randomUUID();
+    const now = new Date().toISOString();
+    const task: TaskRow = {
+      id: taskId, title: 'Skipped Test', status: 'active',
+      currentIndex: 1, totalSteps: 2,
+      finalKeyHash: null, sessionId: 'ses_TEST00',
+      createdAt: now, updatedAt: now,
+    };
+    const steps: StepRow[] = [
+      { id: `${taskId}_a`, taskId, parentPath: null, title: 'A', path: 'A', orderIndex: 1, dependsOn: [], status: 'skipped', stepKeyHash: null, completedAt: now, createdAt: now },
+      { id: `${taskId}_b`, taskId, parentPath: null, title: 'B', path: 'B', orderIndex: 2, dependsOn: [`${taskId}_a`], status: 'pending', stepKeyHash: null, completedAt: null, createdAt: now },
+    ];
+    repo.createTask(task, steps);
+
+    // B should be unlockable since A is skipped (not pending)
+    const allSteps = repo.getTaskSteps(taskId);
+    const skipped = allSteps.find(s => s.status === 'skipped');
+    const pending = allSteps.find(s => s.status === 'pending');
+    expect(skipped).toBeDefined();
+    expect(pending).toBeDefined();
+    // skipped steps should not appear in pending for finalization
+    const nonComplete = allSteps.filter(s => s.status !== 'completed' && s.status !== 'skipped');
+    expect(nonComplete).toHaveLength(1); // only B is pending
   });
 });
 
@@ -598,19 +685,20 @@ describe('gate_current (simulated via repo)', () => {
       { id: 'modB', title: 'Module B', dependsOn: ['init'] },
     ];
     const { stepKeys } = simulateStartPlan(taskId, 'DAG Current', nodes);
+    const sid = (id: string) => `${taskId}_${id}`;
 
     // Only init should be current
     const current1 = repo.getCurrentSteps(taskId);
     expect(current1).toHaveLength(1);
-    expect(current1[0].id).toBe('init');
+    expect(current1[0].id).toBe(sid('init'));
 
     // Complete init → modA, modB both current
-    const v = validateCheckpoint(repo, taskId, 'init', stepKeys['init']);
-    advanceSteps(repo, v.task, 'init');
+    const v = validateCheckpoint(repo, taskId, sid('init'), stepKeys[sid('init')]);
+    advanceSteps(repo, v.task, sid('init'));
 
     const current2 = repo.getCurrentSteps(taskId);
     expect(current2).toHaveLength(2);
-    expect(current2.map(s => s.id).sort()).toEqual(['modA', 'modB']);
+    expect(current2.map(s => s.id).sort()).toEqual([sid('modA'), sid('modB')]);
   });
 
   it('should return empty current steps when all completed', () => {

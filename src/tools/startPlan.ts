@@ -1,11 +1,14 @@
 import { z } from 'zod';
-import crypto from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { flattenPlan } from '../core/plan.js';
-import { generateStepKey } from '../core/keys.js';
+import { generateStepKey, randomCode } from '../core/keys.js';
+import { createSession, type SessionInfo } from '../core/session.js';
 import { createTask } from '../storage/repository.js';
 import { GateErrorCode } from '../core/errors.js';
 import type { PlanNode, TaskRow, StepRow } from '../types/index.js';
+
+// One session per MCP process. Created lazily on first gate_start_plan call.
+let processSession: SessionInfo | null = null;
 
 const stepNodeSchema: z.ZodType<PlanNode> = z.lazy(() =>
   z.object({
@@ -19,7 +22,7 @@ const stepNodeSchema: z.ZodType<PlanNode> = z.lazy(() =>
 export function registerStartPlan(server: McpServer): void {
   server.tool(
     'gate_start_plan',
-    'Create a task plan with nested steps and DAG dependencies. Returns all initial current steps and their keys.',
+    'Create a task plan with nested steps and DAG dependencies. Creates a session on first call. Returns session credentials for CLI resume.',
     {
       title: z.string(),
       steps: z.array(stepNodeSchema),
@@ -42,17 +45,23 @@ export function registerStartPlan(server: McpServer): void {
         };
       }
 
-      // 2. Generate task_id
-      const taskId = `task_${crypto.randomUUID()}`;
+      // 2. Ensure session exists (created lazily on first call)
+      if (!processSession) {
+        processSession = createSession(process.cwd());
+      }
+      const sessionId = processSession.sessionId;
 
-      // 3. Flatten nested plan into leaf steps (with DAG dependsOn)
+      // 3. Generate task_id (6-char alphanumeric)
+      const taskId = `tsk_${randomCode(6)}`;
+
+      // 4. Flatten nested plan into leaf steps (with DAG dependsOn)
       const leafSteps = flattenPlan(params.steps as PlanNode[], taskId);
 
-      // 4. Determine initial current steps: those with empty dependsOn
+      // 5. Determine initial current steps: those with empty dependsOn
       const initialCurrent = leafSteps.filter(s => s.dependsOn.length === 0);
       const stepKeys: Record<string, string> = {};
 
-      // 5. Build TaskRow
+      // 6. Build TaskRow
       const now = new Date().toISOString();
       const task: TaskRow = {
         id: taskId,
@@ -61,11 +70,12 @@ export function registerStartPlan(server: McpServer): void {
         currentIndex: 1,
         totalSteps: leafSteps.length,
         finalKeyHash: null,
+        sessionId,
         createdAt: now,
         updatedAt: now,
       };
 
-      // 6. Build StepRow[] — initial current steps get 'current', others 'pending'
+      // 7. Build StepRow[] — initial current steps get 'current', others 'pending'
       const steps: StepRow[] = leafSteps.map((ls) => {
         const isInitialCurrent = initialCurrent.some(cs => cs.id === ls.id);
         if (isInitialCurrent) {
@@ -100,10 +110,10 @@ export function registerStartPlan(server: McpServer): void {
         };
       });
 
-      // 7. Write to database (atomic transaction)
+      // 8. Write to database (atomic transaction)
       createTask(task, steps);
 
-      // 8. Return result
+      // 9. Return result with session credentials (for CLI resume)
       return {
         content: [
           {
@@ -111,6 +121,12 @@ export function registerStartPlan(server: McpServer): void {
             text: JSON.stringify({
               taskId: task.id,
               status: 'active',
+              session: {
+                sessionId: processSession!.sessionId,
+                sessionSecret: processSession!.sessionSecret,
+                recoveryToken: processSession!.recoveryToken,
+                cliInstanceId: processSession!.cliInstanceId,
+              },
               currentSteps: initialCurrent.map(s => ({
                 stepId: s.id,
                 path: s.path,

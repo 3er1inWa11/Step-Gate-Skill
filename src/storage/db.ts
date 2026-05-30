@@ -11,9 +11,61 @@ mkdirSync(dirname(DB_PATH), { recursive: true });
 const db: Database.Database = new Database(DB_PATH);
 
 db.pragma('journal_mode = WAL');
+db.pragma('synchronous = NORMAL');
+db.pragma('busy_timeout = 5000');
 db.pragma('foreign_keys = ON');
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS programs (
+    program_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    total_nodes INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS program_nodes (
+    node_id TEXT PRIMARY KEY,
+    program_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    order_index INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    session_id TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(program_id) REFERENCES programs(program_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    session_secret_hash TEXT NOT NULL,
+    recovery_token_hash TEXT NOT NULL,
+    title TEXT,
+    workspace TEXT,
+    program_id TEXT,
+    program_node_id TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_by_cli TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(program_id) REFERENCES programs(program_id),
+    FOREIGN KEY(program_node_id) REFERENCES program_nodes(node_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS cli_instances (
+    cli_instance_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    hostname TEXT,
+    pid INTEGER,
+    workspace TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+  );
+
   CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -21,8 +73,10 @@ db.exec(`
     current_index INTEGER NOT NULL DEFAULT 0,
     total_steps INTEGER NOT NULL,
     final_key_hash TEXT,
+    session_id TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
   );
 
   CREATE TABLE IF NOT EXISTS steps (
@@ -50,5 +104,17 @@ db.exec(`
     FOREIGN KEY(task_id) REFERENCES tasks(id)
   );
 `);
+
+// Safe migrations for existing databases
+for (const sql of [
+  "ALTER TABLE tasks ADD COLUMN session_id TEXT",
+  "ALTER TABLE sessions ADD COLUMN created_by_cli TEXT",
+  "ALTER TABLE sessions ADD COLUMN workspace TEXT",
+  "ALTER TABLE sessions ADD COLUMN program_id TEXT",
+  "ALTER TABLE sessions ADD COLUMN program_node_id TEXT",
+  "ALTER TABLE program_nodes ADD COLUMN node_key_hash TEXT",
+]) {
+  try { db.exec(sql); } catch { /* column exists */ }
+}
 
 export default db;

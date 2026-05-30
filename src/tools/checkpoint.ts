@@ -27,12 +27,12 @@ async function handleCheckpoint(params: GateCheckpointInput): Promise<GateCheckp
     // Advance the DAG state machine
     const result = advanceSteps(repo, task, params.stepId);
 
-    // All steps completed → return final_key
+    // All steps completed → return task_key
     if (result.allStepsCompleted) {
       return {
         accepted: true,
         allStepsCompleted: true,
-        finalKey: result.finalKey,
+        taskKey: result.taskKey,
         completedStep: { stepId: currentStep.id, path: currentStep.path },
       };
     }
@@ -72,7 +72,7 @@ async function handleCheckpoint(params: GateCheckpointInput): Promise<GateCheckp
 export function registerCheckpoint(server: McpServer): void {
   server.tool(
     'gate_checkpoint',
-    'Complete a current step and unlock next steps whose dependencies are satisfied. Returns next step keys (may be multiple for parallel branches). Returns final_key when all steps are done.',
+    'Complete a current step and unlock next steps whose dependencies are satisfied. Returns next step keys (may be multiple for parallel branches). Returns task_key when all steps are done.',
     {
       taskId: z.string().describe('The task ID'),
       stepId: z.string().describe('The step ID being completed'),
