@@ -14,30 +14,59 @@ Main Agent (orchestrator)
 
 The Main Agent injects precisely what each Sub Agent needs. No more, no less.
 
-## Protocol: what gets passed
+## Main Agent → Sub Agent dispatch template
 
-### Main Agent → Sub Agent (dispatch)
+Copy this into the Sub Agent's prompt when spawning. Replace `{{...}}` placeholders:
 
-```json
-{
-  "taskId": "tsk_XXXXXX",
-  "taskGoal": "Extract auth middleware into a standalone module",
-  "stepKeys": {
-    "tsk_XXXXXX_extract": "K8F2QZ"
-  },
-  "constraints": [
-    "Only work on this task's scope",
-    "Run step-gate checkpoint after each step",
-    "Return the taskKey when all steps are done"
-  ]
-}
+```
+You are working under Step Gate. A task has already been created for you.
+
+**Task ID**: {{taskId}}
+**Goal**: {{taskGoal}}
+
+**Current unlocked steps and their keys:**
+{{#each currentSteps}}
+  - Step: {{stepId}} ({{path}}) → Key: {{stepKey}}
+{{/each}}
+
+**Rules:**
+1. Execute one step at a time. After completing a step, run:
+   step-gate checkpoint '{"taskId":"{{taskId}}","stepId":"<stepId>","stepKey":"<stepKey>"}'
+2. The checkpoint response will give you nextSteps + nextStepKeys if downstream
+   steps are now unlocked. Use those keys to continue.
+3. If checkpoint returns allStepsCompleted: true, you will receive a taskKey.
+   STOP and report it back — do NOT call finalize yourself.
+4. If checkpoint returns an empty nextSteps list, there may be parallel branches
+   still running. Wait for the Main Agent to tell you to proceed.
+5. NEVER call the current command expecting to get keys back — it does NOT
+   return keys. Keys only appear in start-plan and checkpoint responses.
+
+**When you finish all your steps:**
+Report back to the Main Agent:
+  - taskId: {{taskId}}
+  - taskKey: <from the final checkpoint>
+  - summary: what you accomplished
+  - artifacts: list of files changed/created
+
+The Main Agent will verify your taskKey with finalize.
 ```
 
-Critical: `stepKeys` contains the keys for currently-unlocked steps. The Sub Agent
-needs these to call `checkpoint`. Without them, it can't advance. The Main Agent
-gets them from the `start-plan` or `checkpoint` response.
+## Sub Agent execution loop (what it actually does)
 
-### Sub Agent → Main Agent (return)
+```
+1. Read stepKey from the injected prompt
+2. Execute the step
+3. step-gate checkpoint '{"taskId":"...","stepId":"...","stepKey":"..."}'
+4. Parse response:
+   - { nextSteps: [...], nextStepKeys: {...} } → go to step 1 with new keys
+   - { allStepsCompleted: true, taskKey: "..." } → DONE, report to Main Agent
+   - { nextSteps: [] } → no new steps unlocked, report to Main Agent (parallel wait)
+```
+
+If the Sub Agent hits an error or can't complete a step, it stops and reports
+the current state back to the Main Agent.
+
+## Sub Agent → Main Agent (return)
 
 ```json
 {
@@ -48,98 +77,62 @@ gets them from the `start-plan` or `checkpoint` response.
 }
 ```
 
-If the Sub Agent failed to complete all steps, it returns the current step it's
-stuck on — the Main Agent can re-dispatch or reassign.
+If incomplete (couldn't finish all steps):
+```json
+{
+  "taskId": "tsk_XXXXXX",
+  "status": "partial",
+  "completedSteps": ["extract", "jwt"],
+  "pendingStep": "routes",
+  "reason": "Missing dependency or blocked"
+}
+```
 
-## Full lifecycle
+## Main Agent verify phase (after Sub Agent returns)
 
-### Phase 1 — Plan and create
+```
+Main Agent receives taskKey → calls:
+  step-gate finalize '{"taskId":"...","taskKey":"..."}'
+
+  ✅ Accepted:
+    { level: "task" }      → Node has more tasks, dispatch next Sub Agent
+    { level: "node" }      → Node complete, nodeKey returned, next node unlocked
+    { level: "program" }   → All nodes done, program complete
+
+  ❌ Rejected:
+    { accepted: false, pendingSteps: [...] }
+    → Sub Agent lied or missed steps. Feed pendingSteps back and continue.
+```
+
+## Sub Agent end-of-work self-check
+
+Before a Sub Agent reports "done" to the Main Agent, it MUST verify:
+
+1. `step-gate active-task` — if its taskId is still listed, it's not finalized
+2. If taskKey was obtained from checkpoint, report it immediately (don't lose it)
+3. If taskKey was NOT obtained, report which step is still pending
+
+The Sub Agent does NOT call finalize. Only the Main Agent holds that
+responsibility — it verifies the taskKey cryptographically.
+
+## Full lifecycle summary
 
 ```
 Main Agent:
-  start-plan → creates Task with DAG steps
-  Receives: taskId + currentSteps + stepKeys (for unlocked steps)
+  start-plan → taskId + currentSteps + stepKeys
+  Spawn Sub Agent with dispatch template (above)
+  Wait for Sub Agent return
+  finalize(taskId, taskKey)
+  → level="task" → dispatch next task
+  → level="node" → program start next node, repeat
+  → level="program" → done
 ```
 
-### Phase 2 — Dispatch to Sub Agent
+## Key rules
 
-```
-Main Agent spawns Sub Agent with the injection payload above.
-Sub Agent auto-discovers session from .step-gate/bindings/.
-```
-
-### Phase 3 — Sub Agent executes
-
-```
-Sub Agent loop:
-  1. Read stepKey from the injected payload (or checkpoint response)
-  2. Execute the step
-  3. step-gate checkpoint '{"taskId":"...","stepId":"...","stepKey":"..."}'
-  4. Response gives nextSteps + nextStepKeys (if deps satisfied)
-     OR allStepsCompleted: true + taskKey (if this was the last step)
-```
-
-If a merge point hasn't been reached yet (parallel branches), `nextSteps` is
-empty. The Sub Agent must wait for other branches to complete before the merge
-step unlocks.
-
-### Phase 4 — Sub Agent returns
-
-```
-Sub Agent → Main Agent: { taskId, taskKey, summary, artifacts }
-Main Agent: step-gate finalize '{"taskId":"...","taskKey":"..."}'
-```
-
-### Phase 5 — Verify and propagate
-
-```
-finalize returns:
-  { level: "task" }      → Node has more tasks, dispatch next Sub Agent
-  { level: "node" }      → Node complete, auto-generated nodeKey returned
-  { level: "program" }   → All nodes done, program complete
-
-If finalize REJECTS:
-  { accepted: false, pendingSteps: [...] }
-  → Sub Agent missed steps. Send it the pendingSteps list, continue checkpointing.
-```
-
-### Phase 6 — Next node
-
-```
-When level="node", Main Agent:
-  program status → find next ready node
-  program start <next-node>
-  → start-plan → dispatch → repeat
-```
-
-## Key design rules
-
-1. **Sub Agent never sees the full DAG.** It only knows the steps it's been given
-   keys for. This prevents hallucinated dependencies and keeps context lean.
-
-2. **Main Agent only calls `finalize`.** It doesn't need to inspect execution
-   traces. The taskKey is a cryptographic proof — it either matches or it doesn't.
-
-3. **Keys are single-use and appear once.** The Sub Agent captures them from the
-   checkpoint response. The `current` command does NOT return keys. If a key is
-   lost, the task must be cancelled and rebuilt with skipKey.
-
-4. **SkipKey recovery.** If a Sub Agent dies mid-task, the Main Agent rebuilds:
-   ```
-   cancel-task → start-plan (with skipKey + skipTaskId for completed steps)
-   ```
-   Completed steps are marked `skipped`, remaining steps get fresh keys.
-
-5. **Pure Task mode.** When Program/Node layers aren't needed, just use:
-   ```
-   start-plan → checkpoint × N → finalize
-   ```
-   The Stop Hook checks for unfinalized tasks at session end.
-
-## Progressive disclosure
-
-```
-SKILL.md        → All agents. CLI commands + rules.
-Weaver.md       → Main Agent only. How to dispatch and verify Sub Agents.
-CLI + SQLite    → The Gate itself. Agents don't read this.
-```
+1. **Sub Agent never sees the full DAG.** Injected stepKeys limit what it can do.
+2. **Main Agent calls finalize, not Sub Agent.** Verification is centralized.
+3. **Keys appear once.** Lost key = cancel + rebuild with skipKey.
+4. **Sub Agent self-checks before return.** `active-task` confirms status.
+5. **No shared MCP server.** Each agent calls `step-gate` CLI independently.
+   Session auto-discovery via `.step-gate/bindings/`.
