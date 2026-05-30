@@ -36,6 +36,11 @@ the Task. The Stop Hook will block exit if a Task is left unfinalized.
 Interaction start → start-plan → checkpoint × N → finalize(taskKey) → done
 ```
 
+**Proactive checkpointing is mandatory.** After completing each step, immediately call
+`checkpoint` with the step's key. Do NOT batch checkpoints, do NOT wait for the Hook
+to remind you. The Hook is a safety net, not your workflow. If you see a Hook warning
+that says `ACTION REQUIRED`, stop everything and resolve it before doing anything else.
+
 Node and Program layers are optional — most work only needs the Task level.
 
 ## CLI reference
