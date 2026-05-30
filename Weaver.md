@@ -1,140 +1,145 @@
-# Weaver — Step Gate 编排引擎
+# Weaver — Multi-Agent Orchestration Protocol
 
-## 三层角色
+## Role model
 
 ```
-Main Agent (编排者)       ← 持有 Node/Program 全局视角
-  │                          只做三件事: 派发、校验、推进
-  │                          不写代码、不执行 Step
+Main Agent (orchestrator)
+  │  Only three jobs: dispatch, verify, advance
+  │  Never writes code, never executes steps
   │
-  ├── Sub Agent A            ← 只知道自己的 taskId + taskGoal
-  ├── Sub Agent B            ← 不知道其他 Task、不知道 DAG
-  └── Sub Agent C            ← 不知道 Node/Program 全局
+  ├── Sub Agent A   Knows: taskId + taskGoal + its stepKeys
+  ├── Sub Agent B   Does NOT know: full DAG, other tasks, Node/Program
+  └── Sub Agent C   Does NOT know: validation logic (the Gate handles it)
 ```
 
-Sub Agent 的上下文由 Main Agent 在 Spawn 时精确注入。看不到全局计划，不知道前后 Task，不持有验证逻辑。
+The Main Agent injects precisely what each Sub Agent needs. No more, no less.
 
-## 完整执行流程
+## Protocol: what gets passed
+
+### Main Agent → Sub Agent (dispatch)
+
+```json
+{
+  "taskId": "tsk_XXXXXX",
+  "taskGoal": "Extract auth middleware into a standalone module",
+  "stepKeys": {
+    "tsk_XXXXXX_extract": "K8F2QZ"
+  },
+  "constraints": [
+    "Only work on this task's scope",
+    "Run step-gate checkpoint after each step",
+    "Return the taskKey when all steps are done"
+  ]
+}
+```
+
+Critical: `stepKeys` contains the keys for currently-unlocked steps. The Sub Agent
+needs these to call `checkpoint`. Without them, it can't advance. The Main Agent
+gets them from the `start-plan` or `checkpoint` response.
+
+### Sub Agent → Main Agent (return)
+
+```json
+{
+  "taskId": "tsk_XXXXXX",
+  "taskKey": "A1B2C3",
+  "summary": "Extracted auth middleware to src/middleware/auth.ts",
+  "artifacts": ["src/middleware/auth.ts", "src/middleware/index.ts"]
+}
+```
+
+If the Sub Agent failed to complete all steps, it returns the current step it's
+stuck on — the Main Agent can re-dispatch or reassign.
+
+## Full lifecycle
+
+### Phase 1 — Plan and create
 
 ```
-═══════════════════════════════════════════════════════
-Phase 0 — 规划
-═══════════════════════════════════════════════════════
 Main Agent:
-  program init → 拆分 Node
-  reconcile → 日常诊断
+  start-plan → creates Task with DAG steps
+  Receives: taskId + currentSteps + stepKeys (for unlocked steps)
+```
 
-═══════════════════════════════════════════════════════
-Phase 1 — 启动 Node
-═══════════════════════════════════════════════════════
-Main Agent:
-  program start <node-id>        ← 绑定 session 到 node
-  start-plan → 创建 Task(DAG)    ← 一次交互 = 一个 Task
-  → 拿到 taskId + stepKeys
+### Phase 2 — Dispatch to Sub Agent
 
-═══════════════════════════════════════════════════════
-Phase 2 — 派发
-═══════════════════════════════════════════════════════
-Main Agent → Sub Agent:
-  {
-    "taskId": "tsk_XXX",
-    "taskGoal": "抽离认证中间件",
-    "constraints": ["只处理本Task范围", "完成后调checkpoint"]
-  }
+```
+Main Agent spawns Sub Agent with the injection payload above.
+Sub Agent auto-discovers session from .step-gate/bindings/.
+```
 
-Sub Agent 在同一工作目录启动:
-  → ensureSession() 自动从 .step-gate/bindings/ 发现 session
-  → 无需手动传 sessionId
+### Phase 3 — Sub Agent executes
 
-═══════════════════════════════════════════════════════
-Phase 3 — Sub Agent 执行循环
-═══════════════════════════════════════════════════════
-Sub Agent:
-  current(taskId)
-    → { currentSteps, stepKeys }
+```
+Sub Agent loop:
+  1. Read stepKey from the injected payload (or checkpoint response)
+  2. Execute the step
+  3. step-gate checkpoint '{"taskId":"...","stepId":"...","stepKey":"..."}'
+  4. Response gives nextSteps + nextStepKeys (if deps satisfied)
+     OR allStepsCompleted: true + taskKey (if this was the last step)
+```
 
-  for each step:
-    执行 step
-    checkpoint(taskId, stepId, stepKey)
-      → { nextSteps, nextStepKeys }
-      → 或 { allStepsCompleted: true, taskKey }
+If a merge point hasn't been reached yet (parallel branches), `nextSteps` is
+empty. The Sub Agent must wait for other branches to complete before the merge
+step unlocks.
 
-═══════════════════════════════════════════════════════
-Phase 4 — 交回凭证
-═══════════════════════════════════════════════════════
-Sub Agent → Main Agent:
-  {
-    "taskId": "tsk_XXX",
-    "taskKey": "A1B2C3",
-    "summary": "完成认证中间件抽离",
-    "artifacts": ["src/middleware/auth.ts"]
-  }
+### Phase 4 — Sub Agent returns
 
-═══════════════════════════════════════════════════════
-Phase 5 — Main Agent 校验 + 自动推进
-═══════════════════════════════════════════════════════
-Main Agent:
-  finalize(taskId, taskKey)
+```
+Sub Agent → Main Agent: { taskId, taskKey, summary, artifacts }
+Main Agent: step-gate finalize '{"taskId":"...","taskKey":"..."}'
+```
 
-  ✅ 通过:
-    → 返回 { ok: true, level, ... }
-    → level="task":    Node 还有未完成的 Task，继续派发
-    → level="node":    Node 完成! nodeKey 返回，自动推进
-    → level="program": 全部 Node 完成! 收工
-    → Sub Agent 释放
+### Phase 5 — Verify and propagate
 
-  ❌ 不通过:
-    → 返回 { actualStatus, completedSteps, missingSteps,
-             currentStepId, stepKey }
-    → Main Agent 把真实账本发回 Sub Agent:
-        "你的 TaskKey 未通过 Gate 校验。
-         已完成: step_001, step_002
-         缺失:   step_003, step_004
-         当前应继续 step_003，StepKey: SK_REAL33"
-    → Sub Agent 从 currentStepId 继续 checkpoint
-    → 修完重新 finalize
+```
+finalize returns:
+  { level: "task" }      → Node has more tasks, dispatch next Sub Agent
+  { level: "node" }      → Node complete, auto-generated nodeKey returned
+  { level: "program" }   → All nodes done, program complete
 
-═══════════════════════════════════════════════════════
-Phase 6 — 下一个 Node (自动)
-═══════════════════════════════════════════════════════
-finalize 返回 level="node" 时，Main Agent:
-  program status → 找下一个 ready node
+If finalize REJECTS:
+  { accepted: false, pendingSteps: [...] }
+  → Sub Agent missed steps. Send it the pendingSteps list, continue checkpointing.
+```
+
+### Phase 6 — Next node
+
+```
+When level="node", Main Agent:
+  program status → find next ready node
   program start <next-node>
-  → 创建新 Task → 派发 → 循环
-
-═══════════════════════════════════════════════════════
-收尾
-═══════════════════════════════════════════════════════
-最后一个 Node 完成:
-  finalize → level="program" → Program completed
-  收工
+  → start-plan → dispatch → repeat
 ```
 
-## 关键设计点
+## Key design rules
 
-**Main Agent 只调一个命令**：`finalize(taskKey)`。剩下的系统自动从 Task → Node → Program 传播。
+1. **Sub Agent never sees the full DAG.** It only knows the steps it's been given
+   keys for. This prevents hallucinated dependencies and keeps context lean.
 
-**TaskKey 校验即消费**：finalize 会消耗 taskKey 并推进 DAG，不存在"校验通过但不推进"的状态。
+2. **Main Agent only calls `finalize`.** It doesn't need to inspect execution
+   traces. The taskKey is a cryptographic proof — it either matches or it doesn't.
 
-**Sub Agent 不需要知道**：
-- taskId 的结构含义
-- 完整的 DAG
-- 前后 Task 是什么
-- Node/Program 全局
-- 验证逻辑（系统自己校验）
+3. **Keys are single-use and appear once.** The Sub Agent captures them from the
+   checkpoint response. The `current` command does NOT return keys. If a key is
+   lost, the task must be cancelled and rebuilt with skipKey.
 
-**中断恢复**：taskId + skipKey 重建，旧 step 凭证永久保留。
+4. **SkipKey recovery.** If a Sub Agent dies mid-task, the Main Agent rebuilds:
+   ```
+   cancel-task → start-plan (with skipKey + skipTaskId for completed steps)
+   ```
+   Completed steps are marked `skipped`, remaining steps get fresh keys.
 
-**纯 Task 模式**：不用 Program/Node 时，只需 `start-plan → checkpoint → finalize`。每个交互一个 Task，交互结束 Stop Hook 自动检查。
+5. **Pure Task mode.** When Program/Node layers aren't needed, just use:
+   ```
+   start-plan → checkpoint × N → finalize
+   ```
+   The Stop Hook checks for unfinalized tasks at session end.
 
-## 渐进式披露
+## Progressive disclosure
 
 ```
-SKILL.md (执行协议)         ← 所有 Agent 必读，基础 CLI 命令
-  └─ Weaver.md (编排引擎)   ← Main Agent 读，如何编排 Sub Agent
-       └─ CLI (状态机)       ← 底层实现
-            └─ SQLite (持久化)
+SKILL.md        → All agents. CLI commands + rules.
+Weaver.md       → Main Agent only. How to dispatch and verify Sub Agents.
+CLI + SQLite    → The Gate itself. Agents don't read this.
 ```
-
-Sub Agent 只需要 SKILL.md 中的 CLI 命令，不需要 Weaver.md。
-Main Agent 需要 SKILL.md + Weaver.md。
