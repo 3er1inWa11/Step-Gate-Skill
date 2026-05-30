@@ -1,19 +1,15 @@
 {
   "name": "agent-step-gate",
-  "version": "0.3.0",
-  "description": "CLI + Skill-based Step Ledger & Key Gate for long-running multi-agent orchestration",
+  "version": "0.3.1",
+  "description": "External cryptographic step ledger for long-running multi-agent orchestration",
   "type": "module",
-  "main": "dist/index.js",
   "bin": {
     "step-gate": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/index.js",
-    "cli": "node dist/cli.js",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "cli": "node dist/cli.js"
   },
   "repository": "github:3er1inWa11/Step-Gate-Skill",
   "homepage": "https://github.com/3er1inWa11/Step-Gate-Skill#readme",
@@ -22,12 +18,10 @@
     "dist/",
     "scripts/",
     "SKILL.md",
-    "Weaver.md",
-    "ARCHITECTURE.md"
+    "Weaver.md"
   ],
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^11.0.0",
     "zod": "^4.0"
   },
