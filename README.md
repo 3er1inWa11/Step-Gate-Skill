@@ -13,6 +13,38 @@ It only maintains an external execution ledger and verifies that planned steps h
 
 ---
 
+## 🚀 Quick Start
+
+```bash
+# Install globally
+npm install -g agent-step-gate
+
+# Create a task with steps
+step-gate start-plan '{
+  "title":"Refactor auth module",
+  "steps":[
+    {"id":"extract","title":"Extract middleware","dependsOn":[]},
+    {"id":"jwt","title":"Add JWT validation","dependsOn":[]},
+    {"id":"routes","title":"Update routes","dependsOn":["extract","jwt"]},
+    {"id":"test","title":"Write tests","dependsOn":["routes"]}
+  ]
+}'
+# → Returns taskId + stepKeys for unlocked steps
+
+# Complete a step (unlocks downstream)
+step-gate checkpoint '{"taskId":"tsk_XXX","stepId":"tsk_XXX_extract","stepKey":"K8F2QZ"}'
+# → Returns nextSteps + nextStepKeys
+
+# Finalize when all steps are done
+step-gate finalize '{"taskId":"tsk_XXX","taskKey":"A1B2C3"}'
+```
+
+**One interaction = One Task.** Create a task, checkpoint each step, finalize. The external ledger ensures nothing is skipped.
+
+For multi-session projects, see [Program mode](#program-level-usage). For multi-agent orchestration, see [Weaver.md](Weaver.md).
+
+---
+
 ## ❓ Why
 
 Long-context agents are capable, but they often miss steps in long-running tasks.
