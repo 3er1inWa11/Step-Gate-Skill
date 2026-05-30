@@ -185,6 +185,3 @@ The CLI auto-discovers the session from binding files. No manual session managem
 - `Weaver.md` — Multi-agent orchestration: how a Main Agent spawns Sub Agents, injects
   taskId + stepKey, and verifies returned taskKeys. Read this before orchestrating
   parallel Sub Agents.
-- `ARCHITECTURE.md` — Full architecture: 4-layer model, 7 DB tables, 5 credential types,
-  12 CLI commands, 20+ core functions
-- `docs/security-stress-test-report.md` — Security audit: 9 issues, all resolved
