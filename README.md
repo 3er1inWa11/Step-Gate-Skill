@@ -292,130 +292,59 @@ This saves context and enables scalable multi-agent orchestration.
 
 ---
 
-## 📋 Example
+## 📋 Usage Reference
 
-### Create a task
+For the full command list, see [SKILL.md](SKILL.md).
 
-```bash
-asg task create \
-  --title "Refactor auth token validation" \
-  --steps "Read current implementation" \
-          "Refactor validation logic" \
-          "Update tests" \
-          "Run test suite"
-```
-
-Output:
-
-```text
-Task created: task_abc123
-Current step: step_001
-StepKey: K8F2QZ
-```
-
----
-
-### Complete a step
+### Task workflow
 
 ```bash
-asg step complete \
-  --task task_abc123 \
-  --step step_001 \
-  --key K8F2QZ
+# Create a task
+step-gate start-plan '{"title":"Refactor validation","steps":[
+  {"id":"read","title":"Read current logic","dependsOn":[]},
+  {"id":"refactor","title":"Rewrite validation"},
+  {"id":"test","title":"Run test suite"}
+]}'
+# → Returns taskId + currentSteps + stepKeys
+
+# Check progress
+step-gate current '{"taskId":"tsk_XXXXXX"}'
+
+# Complete a step
+step-gate checkpoint '{"taskId":"tsk_XXXXXX","stepId":"tsk_XXXXXX_read","stepKey":"K8F2QZ"}'
+# → Returns nextSteps + nextStepKeys
+
+# Finalize the task (auto-propagates to Node/Program)
+step-gate finalize '{"taskId":"tsk_XXXXXX","taskKey":"A1B2C3"}'
+# → Returns { level: "task" | "node" | "program" }
+
+# Cancel a task
+step-gate cancel-task '{"taskId":"tsk_XXXXXX"}'
 ```
 
-Output:
-
-```text
-Step completed: step_001
-Next step: step_002
-StepKey: 9XLM2A
-```
-
----
-
-### Finalize a task
+### Program workflow (cross-session)
 
 ```bash
-asg task finalize \
-  --task task_abc123
+# Create a Program with nodes
+step-gate program init '{"title":"Auth refactor","nodes":[
+  {"id":"phase-1","title":"Extract middleware"},
+  {"id":"phase-2","title":"Rewrite validation"}
+]}'
+
+# Start a node
+step-gate program start '{"programId":"pgm_XXXXXX","nodeId":"phase-1"}'
+
+# Create task inside the node
+step-gate start-plan '{"title":"Phase 1 work","steps":[...]}'
+
+# Checkpoint and finalize — completion auto-propagates
+
+# View program status
+step-gate program status '{"programId":"pgm_XXXXXX"}'
+
+# Diagnostic health check
+step-gate reconcile
 ```
-
-If all Steps are complete:
-
-```text
-Task completed.
-TaskKey: TK_7H3Q9Z2M
-```
-
-If not complete:
-
-```text
-Task incomplete.
-
-Missing steps:
-  - step_003: Update tests
-  - step_004: Run test suite
-```
-
----
-
-### Verify a TaskKey
-
-```bash
-asg task verify \
-  --task task_abc123 \
-  --key TK_7H3Q9Z2M
-```
-
-Output:
-
-```text
-TaskKey valid.
-```
-
----
-
-## 📦 Program-level Usage
-
-For large cross-session work, create a Program:
-
-```bash
-asg program create --title "Authentication module refactor"
-```
-
-Create Nodes under the Program:
-
-```bash
-asg node create \
-  --program pgm_auth_refactor \
-  --title "Token validation refactor"
-```
-
-Create Tasks under a Node:
-
-```bash
-asg task create \
-  --node node_token_validation \
-  --title "Refactor token validation implementation" \
-  --steps "Read implementation" \
-          "Modify validation logic" \
-          "Update tests" \
-          "Run tests"
-```
-
-Completion propagates naturally:
-
-```text
-All Steps completed
-  -> Task completed
-  -> Node may become completed
-  -> Program may become completed
-```
-
-The Hook only needs to force-check the current Task.
-
-Program and Node are higher-level planning structures and can be finalized manually or through Skill guidance.
 
 ---
 
@@ -450,99 +379,51 @@ The real enforcement is performed by the Hook and CLI state.
 
 ## 🔔 Hook Behavior
 
-The Stop Hook should check the current Task before the agent gives a final answer.
-
-Pseudo logic:
-
-```text
-on_stop:
-  currentTask = get_current_task()
-
-  if no current task:
-    allow
-
-  result = check_task(currentTask)
-
-  if result.completed:
-    allow
-
-  block with missing step summary
-```
-
-Example command:
-
-```bash
-asg hook check-stop
-```
-
-Possible output:
+The Stop Hook checks for unfinalized tasks before the agent exits. Configure in
+`.claude/settings.local.json`:
 
 ```json
 {
-  "allow": false,
-  "taskId": "task_abc123",
-  "missingSteps": [
-    {
-      "stepId": "step_003",
-      "title": "Update tests"
-    }
-  ]
+  "hooks": {
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "node D:/path/to/scripts/stop-hook.mjs"
+      }]
+    }]
+  }
 }
 ```
 
----
+The hook blocks exit if a task has all steps completed but not finalized, and
+warns if steps are still in progress. In strict mode (`STEP_GATE_STRICT=1`) it
+exits with code 1 to hard-block session termination.
 
 ## 💾 Storage
 
-Agent Step Gate stores local project state.
-
-Recommended storage:
+All state is stored locally in the project directory:
 
 ```text
-.agent-step-gate/
-  ├─ state.db
-  ├─ current-session.json
-  ├─ current-task.json
-  └─ logs/
+.step-gate/
+  ├─ sessions/    — session credential files
+  └─ bindings/    — CLI session auto-discovery
+data/
+  ├─ gate.db      — SQLite database (WAL mode)
+  └─ state.json   — lightweight progress snapshot
 ```
-
-Suggested implementation:
-
-- SQLite
-- WAL mode
-- Append-only event log where possible
-- Project-local isolation
-
----
 
 ## 🔑 Key Model
 
-Agent Step Gate uses short completion keys.
+Agent Step Gate uses short 6-character completion keys ([A-Z0-9], ~2.1B entropy).
 
 ```text
-StepKey:
-  issued after a Step is accepted
-
-TaskKey:
-  issued after all Steps in a Task are completed
+stepKey  — proves a single step was completed (returned once in checkpoint response)
+taskKey  — proves all steps in a task are done (returned in final checkpoint)
+nodeKey  — system-generated receipt when a node completes (returned in finalize)
 ```
 
-Keys should be generated by the system, not by the agent.
-
-Recommended generation:
-
-```text
-randomBytes -> base32/base36 string -> hash before storing
-```
-
-Store only the hash of the key.
-
-Example:
-
-```text
-raw key:  K8F2QZ
-stored:   sha256(K8F2QZ)
-```
+Only the SHA-256 hash is stored — the plaintext key is returned exactly once and
+never persisted. The `current` command never returns keys.
 
 ---
 
@@ -561,30 +442,25 @@ It only verifies execution checkpoints.
 
 ---
 
-## 📝 Suggested Commands
-
-The exact command names can be adapted, but the recommended command groups are:
+## 📝 Command Reference
 
 ```bash
-asg program create
-asg program status
-asg program finalize
+# Task commands
+step-gate start-plan '<json>'     # Create task with DAG steps
+step-gate checkpoint '<json>'     # Complete a step, unlock dependents
+step-gate current '<json>'        # View progress (no keys)
+step-gate finalize '<json>'       # Finalize task, auto-propagate to Node/Program
+step-gate cancel-task '<json>'    # Cancel current session's task
+step-gate active-task             # List active tasks (--all for cross-session)
 
-asg node create
-asg node status
-asg node finalize
+# Program commands
+step-gate program init '<json>'   # Create program with nodes
+step-gate program start '<json>'  # Bind session to a node
+step-gate program status '<json>' # View program progress
+step-gate program rebuild '<json>' # Rebuild plan (dry-run first, then --confirm)
 
-asg task create
-asg task current
-asg task status
-asg task finalize
-asg task verify
-
-asg step current
-asg step complete
-
-asg hook check-stop
-asg resume
+# Diagnostics
+step-gate reconcile               # Health check
 ```
 
 ---
@@ -593,34 +469,17 @@ asg resume
 
 Example stack:
 
-- Node.js / TypeScript
+- Node.js 20+ / TypeScript
 - SQLite / better-sqlite3
 - Zod for validation
-- Vitest for tests
-- Optional MCP adapter
+- Cross-platform (Windows, Mac, Linux)
 
-Install dependencies:
+Install and build:
 
 ```bash
 pnpm install
-```
-
-Run tests:
-
-```bash
-pnpm test
-```
-
-Build:
-
-```bash
 pnpm build
-```
-
-Run locally:
-
-```bash
-pnpm dev
+node dist/cli.js start-plan '{"title":"Test","steps":[{"id":"s1","title":"Step 1","dependsOn":[]}]}'
 ```
 
 
@@ -648,9 +507,9 @@ Any Skill with a multi-step workflow can wrap itself in Agent Step Gate to preve
 ```
 User invokes "complex-refactor" Skill
   └─ Skill internally:
-       1. asg task create --title "Complex refactor" --steps [...]
+       1. step-gate start-plan '{"title":"Complex refactor","steps":[...]}'
        2. Execute each step, checkpoint as you go
-       3. asg task finalize
+       3. step-gate finalize '{"taskId":"...","taskKey":"..."}'
        4. Return TaskKey as completion proof
 ```
 
