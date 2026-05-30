@@ -201,10 +201,9 @@ Agent Step Gate is designed as a CLI-first tool.
 Skill  -> tells the agent how to cooperate
 CLI    -> stores state, issues keys, verifies completion
 Hook   -> blocks incomplete task finalization
-MCP    -> optional adapter for tool-calling agents
 ```
 
-The core system does not require a shared MCP server.
+Each project owns its local execution ledger. No shared server needed.
 
 This makes it easier to avoid cross-terminal conflicts:
 
