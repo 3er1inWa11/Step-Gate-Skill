@@ -16,6 +16,38 @@ work — it only verifies *that you did* what you planned. Think of it as a
 proof-of-work chain for agent steps: every completed step produces a cryptographic key,
 and you cannot finalize a task without the final chain key.
 
+## Hierarchy
+
+Every piece of work in Step Gate lives at exactly one of four levels:
+
+```
+Program     ← 跨会话的完整项目（如"重构整个后端"）
+  ├─ Node   ← 一个执行阶段（如"Phase 1: 提取中间件"）
+  │   ├─ Task   ← 一次 Agent 交互 = 一个 Task
+  │   │   ├─ Step  ← 一个具体、可验证的动作（如"创建 auth.ts"）
+  │   │   ├─ Step  ← 每个 Step 配一条一次性密钥
+  │   │   └─ Step  ← DAG 依赖决定执行顺序
+  │   └─ Task
+  └─ Node
+```
+
+- **Program**: 最高层，跨多个会话。Node 全部完成自动传播。
+- **Node**: 一个执行阶段，包含多个 Task。依赖排序决定何时激活。
+- **Task**: 一次交互。一个 Task 包含多个 Step。
+- **Step**: 最小执行单元。一个 Step = 一个具体动作 + 一条密钥。
+
+**Step 粒度规则：**
+
+Steps 必须够细，让 Sub Agent 无法跳步：
+
+| 坏 Step | 好 Step |
+|---------|---------|
+| "重构 auth 模块" | "提取 auth middleware 到 src/middleware/auth.ts" |
+| "写测试" | "为 auth.ts 写 3 个单元测试" |
+| "更新文档" | "更新 README 的 Auth 章节" |
+
+每个 Step 必须是一个可验证的完成/未完成二元问题。如果一个 Step 包含多个独立动作，拆成多个 Step。
+
 ## Why this exists
 
 Long-context agents lose track of plans. A 15-step refactor becomes 12 steps in the
@@ -28,12 +60,17 @@ in the checkpoint response — if the agent loses it, the step cannot be faked.
 
 ## Core rule
 
-**One interaction = One Task.** At the start of each interaction, create a Task with the
-steps you plan to do. Before the interaction ends, checkpoint every step and finalize
-the Task. The Stop Hook will block exit if a Task is left unfinalized.
+**One interaction = One Task.** At the start of each interaction:
+
+1. **Plan first** — break the work into concrete Steps with DAG dependencies
+2. **Show the DAG to the user** — present the full step plan with dependencies before calling `start-plan`
+3. **Get confirmation** — user must explicitly approve the plan
+4. **Register with StepGate** — call `start-plan` to lock the plan in the external ledger
+5. **Execute** — checkpoint each Step as you complete it
+6. **Finalize** — submit the taskKey to close the Task
 
 ```
-Interaction start → start-plan → checkpoint × N → finalize(taskKey) → done
+Plan → Show DAG → User confirms → start-plan → checkpoint × N → finalize(taskKey) → done
 ```
 
 **Proactive checkpointing is mandatory.** After completing each step, immediately call
@@ -85,10 +122,10 @@ node dist/cli.js cancel-task '{"taskId":"tsk_XXX"}'
 Session-gated — you can only cancel your own tasks. Cross-session cancel requires
 `--admin --recovery-token <token>`.
 
-**active-task** — List active tasks
+**active-task** — List active tasks (cross-session by default)
 ```bash
-node dist/cli.js active-task          # current session only
-node dist/cli.js active-task --all    # all sessions
+node dist/cli.js active-task              # all sessions (default)
+node dist/cli.js active-task --mine       # current session only
 ```
 
 ### Program commands (cross-session projects)

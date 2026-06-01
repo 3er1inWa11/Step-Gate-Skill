@@ -16,6 +16,8 @@ The Main Agent injects precisely what each Sub Agent needs. No more, no less.
 
 ## Main Agent → Sub Agent dispatch template
 
+**Before dispatching:** The Main Agent MUST break the work into concrete, verifiable Steps (see SKILL.md Step granularity rules). Each Step should be one specific action. Never dispatch a Sub Agent with a single vague step like "do the work."
+
 Copy this into the Sub Agent's prompt when spawning. Replace `{{...}}` placeholders:
 
 ```
@@ -23,22 +25,30 @@ You are working under Step Gate. A task has already been created for you.
 
 **Task ID**: {{taskId}}
 **Goal**: {{taskGoal}}
+**Workspace**: {{workspacePath}}
 
-**Current unlocked steps and their keys:**
+**Your assigned steps and their keys:**
 {{#each currentSteps}}
-  - Step: {{stepId}} ({{path}}) → Key: {{stepKey}}
+  - Step: {{stepId}} → "{{path}}" → Key: {{stepKey}}
 {{/each}}
 
 **Rules:**
-1. Execute one step at a time. After completing a step, run:
+1. **You MUST run all step-gate commands from the workspace directory.** The database
+   is stored at `{{workspacePath}}/.step-gate/gate.db`. If you run from a different
+   directory, you will NOT find the task.
+   ```bash
+   cd {{workspacePath}}
+   # then run step-gate commands
+   ```
+2. Execute one step at a time. After completing a step, run:
    step-gate checkpoint '{"taskId":"{{taskId}}","stepId":"<stepId>","stepKey":"<stepKey>"}'
-2. The checkpoint response will give you nextSteps + nextStepKeys if downstream
+3. The checkpoint response will give you nextSteps + nextStepKeys if downstream
    steps are now unlocked. Use those keys to continue.
-3. If checkpoint returns allStepsCompleted: true, you will receive a taskKey.
+4. If checkpoint returns allStepsCompleted: true, you will receive a taskKey.
    STOP and report it back — do NOT call finalize yourself.
-4. If checkpoint returns an empty nextSteps list, there may be parallel branches
+5. If checkpoint returns an empty nextSteps list, there may be parallel branches
    still running. Wait for the Main Agent to tell you to proceed.
-5. NEVER call the current command expecting to get keys back — it does NOT
+6. NEVER call the current command expecting to get keys back — it does NOT
    return keys. Keys only appear in start-plan and checkpoint responses.
 
 **When you finish all your steps:**
@@ -146,9 +156,11 @@ Agent can, after verifying the taskKey is genuine.
 
 Before a Sub Agent reports "done" to the Main Agent, it MUST verify:
 
-1. `step-gate active-task` — if its taskId is still listed, it's not finalized
+1. `step-gate current '{"taskId":"<taskId>"}'` — reads task progress directly by taskId. This works cross-session (no session binding needed). If status is still active with currentSteps, work remains.
 2. If taskKey was obtained from checkpoint, report it immediately (don't lose it)
 3. If taskKey was NOT obtained, report which step is still pending
+
+**Never use `active-task` for self-check** — `active-task` filters by session and may return empty if the Sub Agent's session auto-discovery resolves to a different session than the one that created the Task.
 
 The Sub Agent does NOT call finalize. Only the Main Agent holds that
 responsibility — it verifies the taskKey cryptographically.
@@ -171,6 +183,6 @@ Main Agent:
 1. **Sub Agent never sees the full DAG.** Injected stepKeys limit what it can do.
 2. **Main Agent calls finalize, not Sub Agent.** Verification is centralized.
 3. **Keys appear once.** Lost key = cancel + rebuild with skipKey.
-4. **Sub Agent self-checks before return.** `active-task` confirms status.
+4. **Sub Agent self-checks before return.** Use `current '{"taskId":"..."}'` — bypasses session filter.
 5. **No shared MCP server.** Each agent calls `step-gate` CLI independently.
    Session auto-discovery via `.step-gate/bindings/`.

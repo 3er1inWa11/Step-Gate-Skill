@@ -10,8 +10,8 @@ HAS_ACTIVE=false
 BLOCK=false
 
 # 1. Fast path: read state.json
-if [ -f data/state.json ]; then
-  if grep -q '"hasActiveTask": *true' data/state.json 2>/dev/null; then
+if [ -f .step-gate/state.json ]; then
+  if grep -q '"hasActiveTask": *true' .step-gate/state.json 2>/dev/null; then
     HAS_ACTIVE=true
   fi
 fi

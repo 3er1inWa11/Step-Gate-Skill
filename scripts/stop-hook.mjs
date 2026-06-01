@@ -21,7 +21,7 @@ function cli(args) {
 // Fast path: state.json
 let hasActive = false;
 try {
-  const state = JSON.parse(readFileSync(`${CWD}/data/state.json`, 'utf-8'));
+  const state = JSON.parse(readFileSync(`${CWD}/.step-gate/state.json`, 'utf-8'));
   hasActive = state.hasActiveTask === true;
 } catch { /* no state file */ }
 

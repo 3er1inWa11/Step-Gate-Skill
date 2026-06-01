@@ -18,7 +18,7 @@
 //   active-task
 // ============================================================================
 
-import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { flattenPlan } from './core/plan.js';
 import { generateStepKey, randomCode } from './core/keys.js';
 import { createSession, getCurrentSessionId, verifyRecoveryToken } from './core/session.js';
@@ -59,7 +59,8 @@ function updateStateFile() {
         current: steps.filter(s => s.status === 'current').map(s => s.path),
       };
     });
-    writeFileSync('data/state.json', JSON.stringify({
+    mkdirSync('.step-gate', { recursive: true });
+    writeFileSync('.step-gate/state.json', JSON.stringify({
       hasActiveTask: tasks.length > 0,
       activeTasks: tasks,
     }));
@@ -504,16 +505,22 @@ function cmdCancelTask() {
 }
 
 function cmdActiveTask() {
-  // --all flag: cross-session admin view (used by SessionStart hook)
-  const allFlag = process.argv.includes('--all');
-  if (allFlag) {
-    const tasks = getActiveTasks(); // no session filter
+  // --mine flag: filter to current session only
+  const mineFlag = process.argv.includes('--mine');
+
+  if (mineFlag) {
+    const sess = resolveSessionId();
+    if (!sess) {
+      console.log(JSON.stringify({ activeTasks: [], warning: 'No session bound — use --all to see cross-session tasks or bind a session first.' }));
+      process.exit(0);
+    }
+    const tasks = getActiveTasks(sess.id);
     if (tasks.length === 0) { console.log(JSON.stringify({ activeTasks: [] })); process.exit(0); }
     console.log(JSON.stringify({
       activeTasks: tasks.map(t => {
         const steps = getTaskSteps(t.id);
         return {
-          taskId: t.id, title: t.title, status: t.status, sessionId: t.sessionId, totalSteps: t.totalSteps,
+          taskId: t.id, title: t.title, status: t.status, totalSteps: t.totalSteps,
           completedSteps: steps.filter(s => s.status === 'completed').length,
           currentSteps: steps.filter(s => s.status === 'current').map(s => ({ stepId: s.id, path: s.path, index: s.orderIndex, total: t.totalSteps })),
         };
@@ -522,15 +529,14 @@ function cmdActiveTask() {
     process.exit(0);
   }
 
-  const sess = resolveSessionId();
-  if (!sess) failNoSession();
-  const tasks = getActiveTasks(sess.id);
+  // Default: cross-session (all active tasks, no session filter)
+  const tasks = getActiveTasks();
   if (tasks.length === 0) { console.log(JSON.stringify({ activeTasks: [] })); process.exit(0); }
   console.log(JSON.stringify({
     activeTasks: tasks.map(t => {
       const steps = getTaskSteps(t.id);
       return {
-        taskId: t.id, title: t.title, status: t.status, totalSteps: t.totalSteps,
+        taskId: t.id, title: t.title, status: t.status, sessionId: t.sessionId, totalSteps: t.totalSteps,
         completedSteps: steps.filter(s => s.status === 'completed').length,
         currentSteps: steps.filter(s => s.status === 'current').map(s => ({ stepId: s.id, path: s.path, index: s.orderIndex, total: t.totalSteps })),
       };

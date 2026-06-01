@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Agent Step Gate — SessionStart Hook
-# Lightweight: reads data/state.json first (1ms), falls back to CLI.
+# Lightweight: reads .step-gate/state.json first (1ms), falls back to CLI.
 
 echo '═══════════════════════════════════════════'
 echo '🔒 Step Gate Session Start'
@@ -10,18 +10,18 @@ echo ''
 HAS_ACTIVE=false
 
 # 1. Fast path: read state file (written by CLI on state changes)
-if [ -f data/state.json ]; then
-  if grep -q '"hasActiveTask": *true' data/state.json 2>/dev/null; then
+if [ -f .step-gate/state.json ]; then
+  if grep -q '"hasActiveTask": *true' .step-gate/state.json 2>/dev/null; then
     HAS_ACTIVE=true
     echo '⚠️  当前有未完成的 Step Gate 计划:'
     python3 -c "
 import json
-d=json.load(open('data/state.json'))
+d=json.load(open('.step-gate/state.json'))
 for t in d.get('activeTasks',[]):
   print(f'  {t[\"taskId\"]} | {t[\"title\"]} | {t[\"completed\"]}/{t[\"total\"]} 步')
   for c in t.get('current',[]):
     print(f'    ⏳ {c}')
-" 2>/dev/null || cat data/state.json | head -c 500
+" 2>/dev/null || cat .step-gate/state.json | head -c 500
     echo ''
     echo '📋 继续执行 或 node dist/cli.js cancel-task ...'
     echo ''
