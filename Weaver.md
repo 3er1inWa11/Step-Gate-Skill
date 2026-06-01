@@ -109,6 +109,136 @@ If incomplete (couldn't finish all steps):
 }
 ```
 
+## Task split negotiation (Sub Agent discovers work is too heavy)
+
+**Sub Agent must NEVER cancel a task or create a new task.** Only the Main Agent
+holds these permissions (enforced via settings.json — see below).
+
+When a Sub Agent discovers its assigned task is too heavy:
+
+### Step 1 — Sub Agent checkpoint then report
+
+**Do NOT just report without checkpointing.** Checkpoint everything you've already
+completed — those proofs are permanent and will be skipped on rebuild.
+
+Then report the split recommendation to the Main Agent:
+
+```json
+{
+  "taskId": "tsk_XXXXXX",
+  "status": "too_heavy",
+  "completedSteps": ["extract", "jwt"],
+  "completedStepKeys": { "extract": "KEY1", "jwt": "KEY2" },
+  "blockedStep": "routes",
+  "blockedStepKey": "KEY3",
+  "splitRecommendation": [
+    { "title": "routes — GET endpoints", "steps": ["GET /users", "GET /users/:id"] },
+    { "title": "routes — mutation endpoints", "steps": ["POST /users", "PUT /users/:id", "DELETE /users/:id"] }
+  ],
+  "reason": "routes 这个 step 包含 5 个端点实现，建议拆成 2 个 Task"
+}
+```
+
+### Step 2 — Main Agent decision
+
+Main Agent has three options:
+
+**Option A: Cancel + rebuild (recommended for most cases)**
+
+```bash
+# 1. Cancel the current task (admin mode — Main Agent owns the session)
+step-gate cancel-task '{"taskId":"tsk_XXX"}'
+
+# 2. Rebuild with skipKey to preserve completed steps
+step-gate start-plan '{
+  "title":"routes — GET endpoints",
+  "steps":[
+    {"id":"extract","title":"提取中间件","skipKey":"KEY1","skipTaskId":"tsk_XXX"},
+    {"id":"jwt","title":"JWT验证","skipKey":"KEY2","skipTaskId":"tsk_XXX"},
+    {"id":"getUsers","title":"GET /users","dependsOn":["jwt"]}
+  ]
+}'
+
+# 3. Create second task for remaining work
+step-gate start-plan '{
+  "title":"routes — mutation endpoints",
+  "steps":[...]
+}'
+
+# 4. Dispatch two new Sub Agents with the new taskIds
+```
+
+**Option B: Let Sub Agent continue with remaining steps**
+
+If the Main Agent decides the task is NOT too heavy, it tells the Sub Agent
+to continue. The Sub Agent already has the keys from the initial dispatch.
+
+**Option C: Main Agent absorbs remaining work**
+
+Main Agent checkpoints the remaining steps itself, skipping Sub Agent dispatch.
+
+### Step 3 — Verify skipKey security
+
+SkipKey is one-time use. The `events` table records every consumption. If a
+Sub Agent maliciously tries to reuse a skipKey, the system rejects it at the
+DB transaction level. The cancelled task's completed steps remain as permanent
+audit records (status `completed`), while rebuilt steps are marked `skipped`.
+
+## Permissions enforcement
+
+**Sub Agent must NEVER call these commands:**
+
+| Forbidden | Why |
+|-----------|-----|
+| `finalize` | Only Main Agent verifies taskKey |
+| `cancel-task` | Only Main Agent can cancel/replan |
+| `start-plan` | Only Main Agent creates tasks |
+| `program *` | Only Main Agent manages program structure |
+
+**Sub Agent is only allowed:**
+
+| Allowed | Purpose |
+|---------|---------|
+| `checkpoint` | Report step completion |
+| `current` | Check task progress |
+| `active-task` | Self-check (read-only) |
+
+**Enforce via settings.json:**
+
+The Sub Agent's tool permissions must exclude destructive Step Gate commands.
+In the project `.claude/settings.json` or global `settings.json`, the Sub Agent
+hook environment should limit allowed MCP tools:
+
+```json
+{
+  "hooks": {
+    "SubagentStop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "node",
+        "args": ["D:/StepLeader/scripts/subagent-stop-hook.mjs"],
+        "timeout": 10
+      }]
+    }]
+  },
+  "permissions": {
+    "allow": [
+      "mcp__agent-step-gate__gate_checkpoint",
+      "mcp__agent-step-gate__gate_current",
+      "mcp__agent-step-gate__gate_active_task"
+    ],
+    "deny": [
+      "mcp__agent-step-gate__gate_cancel_task",
+      "mcp__agent-step-gate__gate_start_plan",
+      "mcp__agent-step-gate__gate_finalize"
+    ]
+  }
+}
+```
+
+The Sub Agent literally cannot call `cancel-task` or `start-plan` — the harness
+blocks the tool call before it reaches Step Gate.
+
 ## How the Sub Agent knows it's done
 
 The Sub Agent does NOT call `finalize`. Instead, the **last checkpoint** tells it:
