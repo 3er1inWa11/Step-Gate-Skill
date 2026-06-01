@@ -30,7 +30,7 @@ export function createProgram(title: string, nodes: { id?: string; title: string
     .run(programId, title, 'active', nodes.length, ts, ts);
 
   const programNodes: ProgramNodeInfo[] = nodes.map((n, i) => {
-    const nodeId = n.id ?? `pg_${programId}_${i + 1}`;
+    const nodeId = n.id ? `${programId}_${n.id}` : `nd_${programId}_${i + 1}`;
     db.prepare('INSERT INTO program_nodes (node_id, program_id, title, description, order_index, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(nodeId, programId, n.title, n.description ?? null, i + 1, 'pending', ts);
     return { nodeId, title: n.title, description: n.description, orderIndex: i + 1, status: 'pending' };
