@@ -405,11 +405,11 @@ function cmdProgram() {
       process.exit(1);
     }
     const s = ensureSession();
-    if (!startProgramNode(input.programId, input.nodeId, s.sessionId)) {
+    const result = startProgramNode(input.programId, input.nodeId, s.sessionId); if (!result.ok) {
       console.log(JSON.stringify({ ok: false, error: 'Node not in pending state' }));
       process.exit(1);
     }
-    console.log(JSON.stringify({ ok: true, nodeId: input.nodeId, sessionId: s.sessionId }));
+    console.log(JSON.stringify({ ok: true, nodeId: input.nodeId, sessionId: result.sessionId, tasks: result.tasks }));
     return;
   }
 

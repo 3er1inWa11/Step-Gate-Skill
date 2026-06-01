@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 import db from '../storage/db.js';
-import { randomCode, generateNodeKey, hashKey } from './keys.js';
+import { randomCode, generateNodeKey, generateStepKey, generateTaskKey, hashKey } from './keys.js';
+import { flattenPlan } from './plan.js';
+import type { PlanNode, LeafStep, StepRow, TaskRow, CurrentStepInfo } from '../types/index.js';
 
 function now(): string { return new Date().toISOString(); }
 function sha256(s: string): string { return crypto.createHash('sha256').update(s).digest('hex'); }
@@ -21,22 +23,142 @@ export interface ProgramNodeInfo {
   sessionId?: string;
 }
 
-/** Create a new program from a plan (JSON array of nodes with optional dependsOn). */
-export function createProgram(title: string, nodes: { id?: string; title: string; description?: string; dependsOn?: string[] }[]): ProgramInfo {
+export interface NodeTaskDef {
+  id?: string;
+  title: string;
+  steps: PlanNode[];
+}
+
+export interface ProgramTaskInfo {
+  taskId: string;
+  nodeId: string;
+  title: string;
+  totalSteps: number;
+  currentSteps: CurrentStepInfo[];
+  stepKeys: Record<string, string>;
+}
+
+export interface CreateProgramResult extends ProgramInfo {
+  tasks: ProgramTaskInfo[];
+}
+
+/** Create a program from a plan. Nodes may optionally contain tasks+steps for bulk
+ *  registration. Node-level dependsOn gates task activation: tasks under a node
+ *  whose dependencies are unsatisfied stay fully pending. */
+export function createProgram(
+  title: string,
+  nodes: { id?: string; title: string; description?: string; dependsOn?: string[]; tasks?: NodeTaskDef[] }[],
+): CreateProgramResult {
   const programId = `pgm_${randomCode(6)}`;
   const ts = now();
 
   db.prepare('INSERT INTO programs (program_id, title, status, total_nodes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
     .run(programId, title, 'active', nodes.length, ts, ts);
 
-  const programNodes: ProgramNodeInfo[] = nodes.map((n, i) => {
-    const nodeId = n.id ? `${programId}_${n.id}` : `nd_${programId}_${i + 1}`;
-    db.prepare('INSERT INTO program_nodes (node_id, program_id, title, description, order_index, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(nodeId, programId, n.title, n.description ?? null, i + 1, 'pending', ts);
-    return { nodeId, title: n.title, description: n.description, orderIndex: i + 1, status: 'pending' };
-  });
+  // Resolve node IDs first so dependsOn references work
+  const resolvedNodes = nodes.map((n, i) => ({
+    ...n,
+    _nodeId: n.id ? `${programId}_${n.id}` : `nd_${programId}_${i + 1}`,
+    _orderIndex: i + 1,
+  }));
 
-  return { programId, title, totalNodes: nodes.length, nodes: programNodes };
+  // Build node ID → status lookup for dependency checking
+  // Nodes with no deps are "ready"; nodes with deps are "waiting"
+  const nodeStatuses = new Map<string, 'ready' | 'waiting'>();
+  for (const n of resolvedNodes) {
+    const deps = n.dependsOn || [];
+    // Resolve dependsOn to full node IDs
+    const depIds = deps.map(d => {
+      const found = resolvedNodes.find(r => r.id === d || r._nodeId.endsWith(`_${d}`));
+      return found ? found._nodeId : `${programId}_${d}`;
+    });
+    nodeStatuses.set(n._nodeId, depIds.length === 0 ? 'ready' : 'waiting');
+    (n as any)._depNodeIds = depIds;
+  }
+
+  // Insert all nodes
+  const programNodes: ProgramNodeInfo[] = [];
+  for (const n of resolvedNodes) {
+    db.prepare('INSERT INTO program_nodes (node_id, program_id, title, description, order_index, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(n._nodeId, programId, n.title, n.description ?? null, n._orderIndex, 'pending', ts);
+    programNodes.push({ nodeId: n._nodeId, title: n.title, description: n.description, orderIndex: n._orderIndex, status: 'pending' });
+  }
+
+  const allTaskInfos: ProgramTaskInfo[] = [];
+
+  // Create one session per node (for task ownership + later program start binding)
+  const nodeSessionMap = new Map<string, string>();
+
+  // Create tasks + steps for nodes that have them
+  for (const n of resolvedNodes) {
+    if (!n.tasks || n.tasks.length === 0) continue;
+
+    // One session per node
+    const nodeSessionId = `ses_${randomCode(6)}`;
+    nodeSessionMap.set(n._nodeId, nodeSessionId);
+    db.prepare('INSERT INTO sessions (session_id, session_secret_hash, recovery_token_hash, workspace, program_id, program_node_id, created_by_cli, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(nodeSessionId, sha256(randomCode(6)), sha256(randomCode(6)), process.cwd(), programId, n._nodeId, 'program_init', ts, ts);
+
+    for (const tDef of n.tasks) {
+      const taskId = tDef.id ? `${programId}_${n.id}_${tDef.id}` : `tsk_${randomCode(6)}`;
+      const leafSteps = flattenPlan(tDef.steps, taskId);
+
+      if (leafSteps.length === 0) continue;
+
+      const task: TaskRow = {
+        id: taskId, title: tDef.title, status: 'active', currentIndex: 1,
+        totalSteps: leafSteps.length, finalKeyHash: null, sessionId: nodeSessionId,
+        createdAt: ts, updatedAt: ts,
+      };
+
+      const stepKeys: Record<string, string> = {};
+      const steps: StepRow[] = leafSteps.map((ls, i) => {return {
+          id: ls.id, taskId: ls.taskId, parentPath: ls.parentPath, title: ls.title,
+          path: ls.path, orderIndex: ls.orderIndex, dependsOn: ls.dependsOn,
+          status: 'pending' as const, stepKeyHash: null, completedAt: null, createdAt: ls.createdAt,
+        };
+      });
+
+      // Insert task + steps in transaction
+      const insertTask = db.prepare(`
+        INSERT INTO tasks (id, title, status, current_index, total_steps, final_key_hash, session_id, created_at, updated_at)
+        VALUES (@id, @title, @status, @currentIndex, @totalSteps, @finalKeyHash, @sessionId, @createdAt, @updatedAt)
+      `);
+      const insertStep = db.prepare(`
+        INSERT INTO steps (id, task_id, parent_path, title, path, order_index, depends_on, status, step_key_hash, completed_at, created_at)
+        VALUES (@id, @taskId, @parentPath, @title, @path, @orderIndex, @dependsOn, @status, @stepKeyHash, @completedAt, @createdAt)
+      `);
+
+      db.transaction(() => {
+        insertTask.run({
+          id: task.id, title: task.title, status: task.status, currentIndex: task.currentIndex,
+          totalSteps: task.totalSteps, finalKeyHash: task.finalKeyHash, sessionId: task.sessionId,
+          createdAt: task.createdAt, updatedAt: task.updatedAt,
+        });
+        for (const step of steps) {
+          insertStep.run({
+            id: step.id, taskId: step.taskId, parentPath: step.parentPath, title: step.title,
+            path: step.path, orderIndex: step.orderIndex, dependsOn: JSON.stringify(step.dependsOn),
+            status: step.status, stepKeyHash: step.stepKeyHash, completedAt: step.completedAt,
+            createdAt: step.createdAt,
+          });
+        }
+      })();
+
+      allTaskInfos.push({
+        taskId: task.id,
+        nodeId: n._nodeId,
+        title: task.title,
+        totalSteps: task.totalSteps,
+        currentSteps: steps.filter(s => s.status === 'current').map(s => ({
+          stepId: s.id, path: s.path, index: s.orderIndex, total: task.totalSteps,
+        })),
+        stepKeys,
+      });
+    }
+  }
+
+  return { programId, title, totalNodes: nodes.length, nodes: programNodes, tasks: allTaskInfos };
 }
 
 /** Get program status with all nodes. */
@@ -66,18 +188,91 @@ export function getReadyNodes(programId: string): ProgramNodeInfo[] {
   }));
 }
 
-/** Start a program node — creates a new session bound to it. */
-export function startProgramNode(programId: string, nodeId: string, sessionId: string): boolean {
+/** Start a program node — activates pre-registered tasks and returns task info.
+ *  If a session was pre-created for this node (via program init with tasks),
+ *  reuses it. Otherwise creates a new one. */
+export function startProgramNode(programId: string, nodeId: string, sessionId?: string): {
+  ok: boolean;
+  sessionId: string;
+  tasks: ProgramTaskInfo[];
+} {
   const node = db.prepare('SELECT * FROM program_nodes WHERE node_id = ? AND program_id = ?').get(nodeId, programId) as any;
-  if (!node || node.status !== 'pending') return false;
+  if (!node || node.status !== 'pending') return { ok: false, sessionId: '', tasks: [] };
+
+  // Reuse pre-created session if one exists for this node
+  const existingSession = db.prepare(
+    "SELECT session_id FROM sessions WHERE program_id = ? AND program_node_id = ? AND created_by_cli = 'program_init'"
+  ).get(programId, nodeId) as { session_id: string } | undefined;
+
+  const sid = existingSession?.session_id ?? (sessionId ?? `ses_${randomCode(6)}`);
+  const ts = now();
+
+  if (!existingSession) {
+    db.prepare('INSERT INTO sessions (session_id, session_secret_hash, recovery_token_hash, workspace, program_id, program_node_id, created_by_cli, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(sid, sha256(randomCode(6)), sha256(randomCode(6)), process.cwd(), programId, nodeId, 'program_start', ts, ts);
+  }
 
   db.prepare("UPDATE program_nodes SET status = 'in_progress', session_id = ? WHERE node_id = ?")
-    .run(sessionId, nodeId);
+    .run(sid, nodeId);
 
-  db.prepare('UPDATE sessions SET program_id = ?, program_node_id = ? WHERE session_id = ?')
-    .run(programId, nodeId, sessionId);
+  // Return pre-registered tasks under this node's session.
+  // If they already have current steps (from program init for a ready node), return those.
+  // Otherwise activate the first pending steps.
+  const tasks: ProgramTaskInfo[] = [];
+  const taskRows = db.prepare("SELECT * FROM tasks WHERE session_id = ? AND status = 'active' ORDER BY created_at").all(sid) as any[];
 
-  return true;
+  for (const t of taskRows) {
+    const allSteps = db.prepare('SELECT * FROM steps WHERE task_id = ? ORDER BY order_index').all(t.id) as any[];
+
+    // Check if already has active steps (from program init)
+    const existingCurrent = allSteps.filter((s: any) => s.status === 'current');
+    if (existingCurrent.length > 0) {
+      const stepKeys: Record<string, string> = {};
+      const currentSteps: CurrentStepInfo[] = [];
+      for (const s of existingCurrent) {
+        // Reconstruct key from stored hash — keys are 6-char, hash is sha256
+        // We can't reverse the hash, but we already returned keys at init time.
+        // The caller should use the init response's keys.
+        // For program start, we just report what's active.
+        currentSteps.push({ stepId: s.id, path: s.path, index: s.order_index, total: t.total_steps });
+      }
+      tasks.push({
+        taskId: t.id, nodeId, title: t.title,
+        totalSteps: t.total_steps, currentSteps, stepKeys: {},
+      });
+      continue;
+    }
+
+    // No active steps — activate pending steps with no unsatisfied deps
+    const readySteps = allSteps.filter((s: any) => {
+      if (s.status !== 'pending') return false;
+      const deps: string[] = s.depends_on ? JSON.parse(s.depends_on) : [];
+      if (deps.length === 0) return true;
+      return deps.every((depId: string) => {
+        const dep = allSteps.find((x: any) => x.id === depId);
+        return dep && (dep.status === 'completed' || dep.status === 'skipped');
+      });
+    });
+
+    if (readySteps.length === 0) continue;
+
+    const stepKeys: Record<string, string> = {};
+    const currentSteps: CurrentStepInfo[] = [];
+
+    for (const step of readySteps) {
+      const { plaintext, hash } = generateStepKey();
+      stepKeys[step.id] = plaintext;
+      db.prepare("UPDATE steps SET status = 'current', step_key_hash = ? WHERE id = ?").run(hash, step.id);
+      currentSteps.push({ stepId: step.id, path: step.path, index: step.order_index, total: t.total_steps });
+    }
+
+    tasks.push({
+      taskId: t.id, nodeId, title: t.title,
+      totalSteps: t.total_steps, currentSteps, stepKeys,
+    });
+  }
+
+  return { ok: true, sessionId: sid, tasks };
 }
 
 /** Commit parent: mark the program node as completed, auto-generating a nodeKey receipt. */

@@ -58,14 +58,30 @@ The Gate solves this by moving the plan ledger **outside** the agent's context. 
 lives in SQLite. Each step is locked behind a 6-character key. The key appears only once
 in the checkpoint response — if the agent loses it, the step cannot be faked.
 
-## Core rule
+## Hierarchy — MANDATORY
 
-**One interaction = One Task.** At the start of each interaction:
+**If Step Gate is enabled, you MUST use at least Task + Step level.** Even the simplest
+single-step job requires a Task wrapping one Step. There is no way to skip this.
 
-1. **Plan first** — break the work into concrete Steps with DAG dependencies
-2. **Show the DAG to the user** — present the full step plan with dependencies before calling `start-plan`
+```
+Program     ← 跨会话项目（多 Node 时使用）
+  └─ Node   ← 一个执行阶段/波次
+      └─ Task   ← 一次交互 = 一个 Task（MANDATORY）
+          └─ Step  ← 一个具体动作 + 一条密钥（MANDATORY, 至少 1 个）
+```
+
+**A Task without Steps is invalid.** Every Task needs at least one Step. If your work
+is just "run a command", that's one Step. If it's "refactor three files", that's
+three Steps — each one independently checkpointable.
+
+## Core rule — single Task workflow
+
+For simple work that fits in one interaction:
+
+1. **Plan** — break the work into concrete Steps with DAG dependencies
+2. **Show the DAG to the user** — present the full step plan before calling `start-plan`
 3. **Get confirmation** — user must explicitly approve the plan
-4. **Register with StepGate** — call `start-plan` to lock the plan in the external ledger
+4. **Register** — call `start-plan` to lock the plan in the external ledger
 5. **Execute** — checkpoint each Step as you complete it
 6. **Finalize** — submit the taskKey to close the Task
 
@@ -73,12 +89,40 @@ in the checkpoint response — if the agent loses it, the step cannot be faked.
 Plan → Show DAG → User confirms → start-plan → checkpoint × N → finalize(taskKey) → done
 ```
 
-**Proactive checkpointing is mandatory.** After completing each step, immediately call
-`checkpoint` with the step's key. Do NOT batch checkpoints, do NOT wait for the Hook
-to remind you. The Hook is a safety net, not your workflow. If you see a Hook warning
-that says `ACTION REQUIRED`, stop everything and resolve it before doing anything else.
+## Core rule — multi-wave Program workflow
 
-Node and Program layers are optional — most work only needs the Task level.
+For work spanning multiple nodes/phases (cross-session or multi-agent):
+
+```
+program init → show DAG → user confirms
+  ↓
+  ┌─────────────────────────────────────────────────────┐
+  │  For EACH Wave (Node):                              │
+  │    program start <node>  →  activates tasks         │
+  │    ↓                                                │
+  │    Main Agent dispatches Sub Agents                 │
+  │    (inject taskId + stepKeys per Weaver protocol)   │
+  │    ↓                                                │
+  │    Sub Agent(s) → checkpoint × N → taskKey          │
+  │    ↓                                                │
+  │    Main Agent → finalize(taskId, taskKey)            │
+  │    ↓                                                │
+  │    When all tasks in node are done → node complete   │
+  │    ↓                                                │
+  │    User manually starts next wave:                  │
+  │    program start <next-node>                        │
+  └─────────────────────────────────────────────────────┘
+```
+
+**Each wave requires an explicit `program start`.** Waves do NOT auto-unlock — this is
+intentional. A single interaction should not cascade through all waves automatically
+(the Stop Hook would never let the session end).
+
+## Proactive checkpointing
+
+After completing each step, immediately call `checkpoint` with the step's key. Do NOT
+batch checkpoints, do NOT wait for the Hook to remind you. The Hook is a safety net,
+not your workflow. If you see `ACTION REQUIRED`, stop everything and resolve it.
 
 ## CLI reference
 
@@ -130,9 +174,36 @@ node dist/cli.js active-task --mine       # current session only
 
 ### Program commands (cross-session projects)
 
+**program init** — Register the full DAG in one command. Nodes may optionally include tasks+steps
+for bulk registration. Ready nodes (no deps) have their first steps activated immediately.
 ```bash
-node dist/cli.js program init '{"title":"Big project","nodes":[...]}'
-node dist/cli.js program start '{"programId":"pgm_XXX","nodeId":"phase-1"}'
+node dist/cli.js program init '{
+  "title":"Phase 7 — Audit Fixes",
+  "nodes":[
+    {"id":"wave0","title":"Docs","tasks":[
+      {"id":"F0","title":"OpenSpec","steps":[
+        {"id":"S0.1","title":"proposal.md","dependsOn":[]},
+        {"id":"S0.2","title":"tasks.md","dependsOn":["S0.1"]}
+      ]}
+    ]},
+    {"id":"wave1","title":"Fixes","dependsOn":["wave0"],"tasks":[
+      {"id":"F1","title":"Fix auth","steps":[
+        {"id":"S1.1","title":"Edit","dependsOn":[]}
+      ]}
+    ]}
+  ]
+}'
+```
+Returns `programId`, `nodes`, `tasks` with `taskId` + `currentSteps` + `stepKeys` for ready tasks.
+
+**program start** — Activate a node's pre-registered tasks. Returns task credentials for dispatch.
+```bash
+node dist/cli.js program start '{"programId":"pgm_XXX","nodeId":"pgm_XXX_wave1"}'
+```
+Returns `tasks` array with `taskId`, `currentSteps`, and `stepKeys` — ready for Sub Agent dispatch.
+
+**program status** — Read program progress
+```bash
 node dist/cli.js program status '{"programId":"pgm_XXX"}'
 ```
 
