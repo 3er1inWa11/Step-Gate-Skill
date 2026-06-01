@@ -186,7 +186,32 @@ audit records (status `completed`), while rebuilt steps are marked `skipped`.
 
 ## Permissions enforcement
 
-**Sub Agent must NEVER call these commands:**
+Step Gate is CLI-only (not MCP). All commands run via `node dist/cli.js <command>`.
+Enforcement happens at two levels:
+
+### 1. Bash allow list (project `.claude/settings.local.json`)
+
+Only whitelisted CLI commands auto-execute. Destructive commands require user approval:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(node dist/cli.js checkpoint *)",
+      "Bash(node dist/cli.js current *)",
+      "Bash(node dist/cli.js active-task *)"
+    ]
+  }
+}
+```
+
+`cancel-task`, `start-plan`, `finalize`, and `program *` are NOT in the allow list.
+When a Sub Agent tries to call them, the user gets a confirmation prompt — and can
+deny it.
+
+### 2. Protocol rules (this document)
+
+**Sub Agent must NEVER call:**
 
 | Forbidden | Why |
 |-----------|-----|
@@ -203,41 +228,8 @@ audit records (status `completed`), while rebuilt steps are marked `skipped`.
 | `current` | Check task progress |
 | `active-task` | Self-check (read-only) |
 
-**Enforce via settings.json:**
-
-The Sub Agent's tool permissions must exclude destructive Step Gate commands.
-In the project `.claude/settings.json` or global `settings.json`, the Sub Agent
-hook environment should limit allowed MCP tools:
-
-```json
-{
-  "hooks": {
-    "SubagentStop": [{
-      "hooks": [{
-        "type": "command",
-        "command": "node",
-        "args": ["D:/StepLeader/scripts/subagent-stop-hook.mjs"],
-        "timeout": 10
-      }]
-    }]
-  },
-  "permissions": {
-    "allow": [
-      "mcp__agent-step-gate__gate_checkpoint",
-      "mcp__agent-step-gate__gate_current",
-      "mcp__agent-step-gate__gate_active_task"
-    ],
-    "deny": [
-      "mcp__agent-step-gate__gate_cancel_task",
-      "mcp__agent-step-gate__gate_start_plan",
-      "mcp__agent-step-gate__gate_finalize"
-    ]
-  }
-}
-```
-
-The Sub Agent literally cannot call `cancel-task` or `start-plan` — the harness
-blocks the tool call before it reaches Step Gate.
+If a Sub Agent violates these rules, the user sees a Bash permission prompt.
+The SubagentStop Hook then reminds the Main Agent to verify the Sub Agent's work.
 
 ## How the Sub Agent knows it's done
 
