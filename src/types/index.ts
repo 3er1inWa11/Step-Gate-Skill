@@ -45,6 +45,8 @@ export interface TaskRow {
   currentIndex: number;
   totalSteps: number;
   finalKeyHash: string | null;
+  programId: string | null;
+  programNodeId: string | null;
   sessionId: string | null;
   createdAt: string;
   updatedAt: string;

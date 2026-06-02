@@ -108,7 +108,8 @@ export function createProgram(
 
       const task: TaskRow = {
         id: taskId, title: tDef.title, status: 'active', currentIndex: 1,
-        totalSteps: leafSteps.length, finalKeyHash: null, sessionId: nodeSessionId,
+        totalSteps: leafSteps.length, finalKeyHash: null,
+        programId, programNodeId: n._nodeId, sessionId: nodeSessionId,
         createdAt: ts, updatedAt: ts,
       };
 
@@ -122,8 +123,8 @@ export function createProgram(
 
       // Insert task + steps in transaction
       const insertTask = db.prepare(`
-        INSERT INTO tasks (id, title, status, current_index, total_steps, final_key_hash, session_id, created_at, updated_at)
-        VALUES (@id, @title, @status, @currentIndex, @totalSteps, @finalKeyHash, @sessionId, @createdAt, @updatedAt)
+        INSERT INTO tasks (id, title, status, current_index, total_steps, final_key_hash, program_id, program_node_id, session_id, created_at, updated_at)
+        VALUES (@id, @title, @status, @currentIndex, @totalSteps, @finalKeyHash, @programId, @programNodeId, @sessionId, @createdAt, @updatedAt)
       `);
       const insertStep = db.prepare(`
         INSERT INTO steps (id, task_id, parent_path, title, path, order_index, depends_on, status, step_key_hash, completed_at, created_at)
@@ -133,7 +134,9 @@ export function createProgram(
       db.transaction(() => {
         insertTask.run({
           id: task.id, title: task.title, status: task.status, currentIndex: task.currentIndex,
-          totalSteps: task.totalSteps, finalKeyHash: task.finalKeyHash, sessionId: task.sessionId,
+          totalSteps: task.totalSteps, finalKeyHash: task.finalKeyHash,
+          programId: task.programId ?? null, programNodeId: task.programNodeId ?? null,
+          sessionId: task.sessionId,
           createdAt: task.createdAt, updatedAt: task.updatedAt,
         });
         for (const step of steps) {

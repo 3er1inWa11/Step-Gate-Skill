@@ -23,6 +23,8 @@ function mapTaskRow(row: Record<string, unknown>): TaskRow {
     currentIndex: row.current_index as number,
     totalSteps: row.total_steps as number,
     finalKeyHash: (row.final_key_hash as string) ?? null,
+    programId: (row.program_id as string) ?? null,
+    programNodeId: (row.program_node_id as string) ?? null,
     sessionId: (row.session_id as string) ?? null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
@@ -69,8 +71,8 @@ export function createTask(task: TaskRow, steps: StepRow[]): void {
   }
 
   const insertTask = db.prepare(`
-    INSERT INTO tasks (id, title, status, current_index, total_steps, final_key_hash, session_id, created_at, updated_at)
-    VALUES (@id, @title, @status, @currentIndex, @totalSteps, @finalKeyHash, @sessionId, @createdAt, @updatedAt)
+    INSERT INTO tasks (id, title, status, current_index, total_steps, final_key_hash, program_id, program_node_id, session_id, created_at, updated_at)
+    VALUES (@id, @title, @status, @currentIndex, @totalSteps, @finalKeyHash, @programId, @programNodeId, @sessionId, @createdAt, @updatedAt)
   `);
 
   const insertStep = db.prepare(`
@@ -81,6 +83,8 @@ export function createTask(task: TaskRow, steps: StepRow[]): void {
   const transaction = db.transaction(() => {
     insertTask.run({
       id: task.id,
+      programId: task.programId ?? null,
+      programNodeId: task.programNodeId ?? null,
       title: task.title,
       status: task.status,
       currentIndex: task.currentIndex,

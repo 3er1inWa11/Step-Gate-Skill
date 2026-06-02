@@ -218,7 +218,8 @@ function cmdStartPlan() {
 
   const task: TaskRow = {
     id: taskId, title: input.title, status: 'active', currentIndex: 1,
-    totalSteps: leafSteps.length, finalKeyHash: null, sessionId: sess.sessionId,
+    totalSteps: leafSteps.length, finalKeyHash: null,
+    programId: null, programNodeId: null, sessionId: sess.sessionId,
     createdAt: now, updatedAt: now,
   };
 
