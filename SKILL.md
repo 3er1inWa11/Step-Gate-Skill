@@ -288,21 +288,21 @@ step 字段:
 输入:  program init '{"title":"项目名","nodes":[
   {"id":"wave0","title":"阶段0","tasks":[
     {"id":"T0","title":"任务0","steps":[
-      {"id":"s1","title":"步骤1","dependsOn":[]}
+      {"id":"s1","title":"步骤1","dependsOn":[]},
+      {"id":"s2","title":"步骤2","dependsOn":["s1"]}
+    ]},
+    {"id":"T1","title":"任务1","steps":[
+      {"id":"s3","title":"步骤3","dependsOn":["T0"]}
+      // ↑ Step 可依赖另一个 Task（容器引用，表示等 T0 全部完成）
     ]}
   ]},
   {"id":"wave1","title":"阶段1","dependsOn":["wave0"],"tasks":[...]}
 ]}'
 
-node 字段:
-  id         — 字符串，可选（自动加 programId 前缀）
-  title      — 字符串，必填
-  dependsOn  — 字符串数组，可选（Node 级依赖，对应的 Node 完成前不能启动）
-  tasks      — 任务数组，可选（批量预注册 Task）
-    每个 task:
-      id     — 字符串，可选（前缀: programId_nodeId_taskId）
-      title  — 字符串，必填
-      steps  — PlanNode[]，必填（格式同 start-plan 的 steps）
+三层依赖:
+  Step 级   — dependsOn: ["同Task的stepId"] 或 ["其他Task的id"]（容器引用=等该Task全部完成）
+  Task 级   — 通过 Step 的 dependsOn 引用其他 Task 的 id 实现（Task 本身无独立 dependsOn 字段）
+  Node 级   — dependsOn: ["其他Node的id"]（Node 完成前不能启动）
 
 输出: {
   ok: true, programId: "pgm_XXX", title: "...", totalNodes: 4,
