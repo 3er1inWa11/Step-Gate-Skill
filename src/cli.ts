@@ -250,7 +250,12 @@ function cmdStartPlan() {
 function cmdCheckpoint() {
   const input = parseArg(process.argv[3]);
   if (!input?.taskId || !input?.stepId || !input?.stepKey) {
-    console.log(JSON.stringify({ ok: false, error: 'INVALID_INPUT', message: 'taskId, stepId, stepKey required' }));
+    console.log(JSON.stringify({
+      ok: false,
+      error: 'INVALID_INPUT',
+      message: 'taskId, stepId, stepKey required',
+      fix: 'node dist/cli.js checkpoint \'{"taskId":"tsk_XXX","stepId":"tsk_XXX_yy","stepKey":"A1B2C3"}\'',
+    }));
     process.exit(1);
   }
 
@@ -264,10 +269,15 @@ function cmdCheckpoint() {
     completedPath = r.currentStep.path;
   } catch (e: unknown) {
     const err = e as { code?: string; message?: string; context?: { stepId: string; path: string; index: number; total: number } };
+    const current = err.context;
+    const fixCmd = current
+      ? `node dist/cli.js checkpoint '{"taskId":"${input.taskId}","stepId":"${current.stepId}","stepKey":"<YOUR_STEP_KEY>"}'`
+      : `node dist/cli.js current '{"taskId":"${input.taskId}"}'  # check what step is current`;
     console.log(JSON.stringify({
       ok: false,
       error: err.code ?? 'CHECKPOINT_FAILED',
       message: err.message,
+      fix: fixCmd,
       currentStep: err.context ? { stepId: err.context.stepId, path: err.context.path, index: err.context.index, total: err.context.total } : undefined,
     }));
     process.exit(1);
@@ -309,18 +319,39 @@ function cmdCurrent() {
 function cmdFinalize() {
   const input = parseArg(process.argv[3]);
   if (!input?.taskId || !input?.taskKey) {
-    console.log(JSON.stringify({ ok: false, error: 'INVALID_INPUT', message: 'taskId and taskKey are required' }));
+    console.log(JSON.stringify({
+      ok: false,
+      error: 'INVALID_INPUT',
+      message: 'taskId and taskKey are required',
+      fix: 'node dist/cli.js finalize \'{"taskId":"tsk_XXX","taskKey":"YOUR_TASKKEY"}\'\n  taskKey comes from the LAST checkpoint response (allStepsCompleted: true)',
+    }));
     process.exit(1);
   }
   const task = getTask(input.taskId);
-  if (!task) { console.log(JSON.stringify({ ok: false, message: 'Task not found' })); process.exit(1); }
+  if (!task) { console.log(JSON.stringify({
+    ok: false, error: 'TASK_NOT_FOUND', message: 'Task not found',
+    fix: 'Check taskId with: node dist/cli.js active-task',
+  })); process.exit(1); }
   if (task.status === 'completed') { console.log(JSON.stringify({ ok: true, status: 'completed', level: 'task', message: 'Already finalized' })); process.exit(0); }
-  if (task.status === 'cancelled') { console.log(JSON.stringify({ ok: false, message: 'Task was cancelled' })); process.exit(1); }
+  if (task.status === 'cancelled') { console.log(JSON.stringify({
+    ok: false, error: 'TASK_CANCELLED', message: 'Task was cancelled',
+    fix: 'Create a new task with: node dist/cli.js start-plan \'{"title":"...","steps":[...]}\'',
+  })); process.exit(1); }
 
   if (!verifyTaskKey(input.taskId, input.taskKey)) {
     const allSteps = getTaskSteps(input.taskId);
-    const pending = allSteps.filter(s => s.status !== 'completed' && s.status !== 'skipped').map(s => ({ stepId: s.id, path: s.path, index: s.orderIndex, total: task.totalSteps }));
-    console.log(JSON.stringify({ ok: false, status: 'active', level: 'task', message: 'Steps not checkpointed', pendingSteps: pending }));
+    const pending = allSteps.filter(s => s.status !== 'completed' && s.status !== 'skipped');
+    const current = pending.filter(s => s.status === 'current');
+    console.log(JSON.stringify({
+      ok: false,
+      status: 'active',
+      level: 'task',
+      message: 'Steps not checkpointed. Complete all steps before finalizing.',
+      pendingSteps: pending.map(s => ({ stepId: s.id, path: s.path, index: s.orderIndex, total: task.totalSteps })),
+      fix: current.length > 0
+        ? `node dist/cli.js checkpoint '{"taskId":"${input.taskId}","stepId":"${current[0].id}","stepKey":"<YOUR_STEP_KEY>"}'`
+        : `node dist/cli.js current '{"taskId":"${input.taskId}"}'  # find current step`,
+    }));
     process.exit(1);
   }
 
@@ -405,8 +436,14 @@ function cmdProgram() {
       process.exit(1);
     }
     const s = ensureSession();
-    const result = startProgramNode(input.programId, input.nodeId, s.sessionId); if (!result.ok) {
-      console.log(JSON.stringify({ ok: false, error: 'Node not in pending state' }));
+    const result = startProgramNode(input.programId, input.nodeId, s.sessionId);
+    if (!result.ok) {
+      console.log(JSON.stringify({
+        ok: false,
+        error: 'NODE_NOT_READY',
+        message: result._error || 'Node not in pending state or dependencies unsatisfied',
+        fix: 'Check with: node dist/cli.js program status \'{"programId":"' + input.programId + '"}\'',
+      }));
       process.exit(1);
     }
     console.log(JSON.stringify({ ok: true, nodeId: input.nodeId, sessionId: result.sessionId, tasks: result.tasks }));
@@ -544,9 +581,63 @@ function cmdActiveTask() {
   }));
 }
 
+// ---- Help ----
+
+function cmdHelp() {
+  console.log(`
+╔══════════════════════════════════════════════════════════════╗
+║  StepGate CLI — Agent External Execution Ledger              ║
+╚══════════════════════════════════════════════════════════════╝
+
+Usage: node dist/cli.js <command> '<json>'
+
+Task Commands:
+  start-plan   Create a task with steps
+  checkpoint   Complete a step with its key
+  current      Read task progress (never returns keys)
+  finalize     Close a completed task with taskKey
+  cancel-task  Cancel a task (session-gated)
+  active-task  List all active tasks (cross-session)
+
+Program Commands:
+  program init    Register a full Program→Node→Task→Step DAG
+  program start   Activate a node's tasks + get stepKeys
+  program status  Read program progress
+  program rebuild Dry-run or execute rebuild (needs --confirm)
+  program ready   List ready nodes
+
+Diagnostics:
+  reconcile  Full DB health check
+
+Examples:
+  # Simple task
+  node dist/cli.js start-plan '{"title":"Refactor","steps":[{"id":"a","title":"Extract","dependsOn":[]}]}'
+
+  # Checkpoint a step
+  node dist/cli.js checkpoint '{"taskId":"tsk_XXX","stepId":"tsk_XXX_a","stepKey":"A1B2C3"}'
+
+  # Read progress (no keys returned!)
+  node dist/cli.js current '{"taskId":"tsk_XXX"}'
+
+  # Close completed task
+  node dist/cli.js finalize '{"taskId":"tsk_XXX","taskKey":"D4E5F6"}'
+
+  # Multi-wave program
+  node dist/cli.js program init '{"title":"Phase 7","nodes":[...]}'
+  node dist/cli.js program start '{"programId":"pgm_XXX","nodeId":"pgm_XXX_wave1"}'
+
+All output is JSON. Non-zero exit = error.
+`);
+  process.exit(0);
+}
+
 // ---- Main dispatch ----
 
 const args = process.argv.slice(2);
+if (args.length === 0 || args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
+  cmdHelp();
+}
+
 const cmds: Record<string, () => void> = {
   'start-plan': cmdStartPlan,
   'checkpoint': cmdCheckpoint,
@@ -554,18 +645,17 @@ const cmds: Record<string, () => void> = {
   'finalize': cmdFinalize,
   'cancel-task': cmdCancelTask,
   'active-task': cmdActiveTask,
-  'gate_start_plan': cmdStartPlan,     // legacy compat
-  'gate_checkpoint': cmdCheckpoint,
-  'gate_current': cmdCurrent,
-  'gate_finalize': cmdFinalize,
-  'gate_cancel_task': cmdCancelTask,
-  'gate_active_task': cmdActiveTask,
   'program': cmdProgram,
   'reconcile': cmdReconcile,
 };
 
 const cmd = cmds[args[0]];
 if (cmd) { cmd(); } else {
-  console.log(JSON.stringify({ error: `Unknown command: ${args[0]}` }));
+  console.log(JSON.stringify({
+    error: 'UNKNOWN_COMMAND',
+    message: `Unknown command: ${args[0]}`,
+    fix: 'Run: node dist/cli.js --help',
+    availableCommands: Object.keys(cmds),
+  }));
   process.exit(1);
 }

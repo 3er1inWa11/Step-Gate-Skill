@@ -140,6 +140,7 @@ for (const sql of [
   "ALTER TABLE sessions ADD COLUMN program_id TEXT",
   "ALTER TABLE sessions ADD COLUMN program_node_id TEXT",
   "ALTER TABLE program_nodes ADD COLUMN node_key_hash TEXT",
+  "ALTER TABLE program_nodes ADD COLUMN depends_on TEXT",
 ]) {
   try { db.exec(sql); } catch { /* column exists */ }
 }

@@ -79,8 +79,9 @@ export function createProgram(
   // Insert all nodes
   const programNodes: ProgramNodeInfo[] = [];
   for (const n of resolvedNodes) {
-    db.prepare('INSERT INTO program_nodes (node_id, program_id, title, description, order_index, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(n._nodeId, programId, n.title, n.description ?? null, n._orderIndex, 'pending', ts);
+    const depNodeIds = (n as any)._depNodeIds as string[] || [];
+    db.prepare('INSERT INTO program_nodes (node_id, program_id, title, description, order_index, depends_on, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(n._nodeId, programId, n.title, n.description ?? null, n._orderIndex, JSON.stringify(depNodeIds), 'pending', ts);
     programNodes.push({ nodeId: n._nodeId, title: n.title, description: n.description, orderIndex: n._orderIndex, status: 'pending' });
   }
 
@@ -195,9 +196,24 @@ export function startProgramNode(programId: string, nodeId: string, sessionId?: 
   ok: boolean;
   sessionId: string;
   tasks: ProgramTaskInfo[];
+  _error?: string;
 } {
   const node = db.prepare('SELECT * FROM program_nodes WHERE node_id = ? AND program_id = ?').get(nodeId, programId) as any;
   if (!node || node.status !== 'pending') return { ok: false, sessionId: '', tasks: [] };
+
+  // Check node dependencies — all must be completed
+  const nodeDeps: string[] = node.depends_on ? JSON.parse(node.depends_on) : [];
+  if (nodeDeps.length > 0) {
+    const incomplete = db.prepare(
+      `SELECT COUNT(*) as cnt FROM program_nodes WHERE program_id = ? AND node_id IN (${nodeDeps.map(() => '?').join(',')}) AND status != 'completed'`
+    ).get(programId, ...nodeDeps) as { cnt: number };
+    if (incomplete.cnt > 0) return {
+      ok: false,
+      sessionId: '',
+      tasks: [],
+      _error: `Node has ${incomplete.cnt} unsatisfied dependencies`,
+    };
+  }
 
   // Reuse pre-created session if one exists for this node
   const existingSession = db.prepare(
