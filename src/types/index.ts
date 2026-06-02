@@ -45,6 +45,7 @@ export interface TaskRow {
   currentIndex: number;
   totalSteps: number;
   finalKeyHash: string | null;
+  dependsOn: string[];
   programId: string | null;
   programNodeId: string | null;
   sessionId: string | null;
@@ -63,6 +64,7 @@ export interface StepRow {
   dependsOn: string[];
   status: 'pending' | 'current' | 'completed' | 'skipped';
   stepKeyHash: string | null;
+  currentKey: string | null;
   completedAt: string | null;
   createdAt: string;
 }

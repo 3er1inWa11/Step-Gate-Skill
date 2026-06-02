@@ -1,6 +1,7 @@
 import type { TaskRow, StepRow, CurrentStepInfo } from '../types/index.js';
 import { GateError, GateErrorCode } from './errors.js';
 import { generateStepKey, generateTaskKey, hashKey } from './keys.js';
+import db from '../storage/db.js';
 
 export interface GateRepository {
   getTask(taskId: string): TaskRow | undefined;
@@ -103,6 +104,11 @@ export function advanceSteps(
       task.id,
       null
     );
+
+    // Store plaintext keys for context-loss recovery
+    for (const [stepId, key] of Object.entries(nextStepKeys)) {
+      db.prepare("UPDATE steps SET current_key = ? WHERE id = ?").run(key, stepId);
+    }
 
     return {
       nextSteps: unlockedSteps.map(s => ({

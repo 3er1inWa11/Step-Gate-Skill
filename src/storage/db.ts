@@ -86,6 +86,7 @@ db.exec(`
     current_index INTEGER NOT NULL DEFAULT 0,
     total_steps INTEGER NOT NULL,
     final_key_hash TEXT,
+    depends_on TEXT,
     program_id TEXT,
     program_node_id TEXT,
     session_id TEXT,
@@ -106,6 +107,7 @@ db.exec(`
     depends_on TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     step_key_hash TEXT,
+    current_key TEXT,
     completed_at TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY(task_id) REFERENCES tasks(id)
@@ -133,6 +135,8 @@ for (const sql of [
   "ALTER TABLE program_nodes ADD COLUMN depends_on TEXT",
   "ALTER TABLE tasks ADD COLUMN program_id TEXT",
   "ALTER TABLE tasks ADD COLUMN program_node_id TEXT",
+  "ALTER TABLE steps ADD COLUMN current_key TEXT",
+  "ALTER TABLE tasks ADD COLUMN depends_on TEXT",
 ]) {
   try { db.exec(sql); } catch { /* column exists */ }
 }

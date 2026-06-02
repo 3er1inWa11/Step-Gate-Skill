@@ -23,6 +23,7 @@ function mapTaskRow(row: Record<string, unknown>): TaskRow {
     currentIndex: row.current_index as number,
     totalSteps: row.total_steps as number,
     finalKeyHash: (row.final_key_hash as string) ?? null,
+    dependsOn: row.depends_on ? (JSON.parse(row.depends_on as string) as string[]) : [],
     programId: (row.program_id as string) ?? null,
     programNodeId: (row.program_node_id as string) ?? null,
     sessionId: (row.session_id as string) ?? null,
@@ -42,6 +43,7 @@ function mapStepRow(row: Record<string, unknown>): StepRow {
     dependsOn: row.depends_on ? (JSON.parse(row.depends_on as string) as string[]) : [],
     status: row.status as StepRow['status'],
     stepKeyHash: (row.step_key_hash as string) ?? null,
+    currentKey: (row.current_key as string) ?? null,
     completedAt: (row.completed_at as string) ?? null,
     createdAt: row.created_at as string,
   };
@@ -71,13 +73,13 @@ export function createTask(task: TaskRow, steps: StepRow[]): void {
   }
 
   const insertTask = db.prepare(`
-    INSERT INTO tasks (id, title, status, current_index, total_steps, final_key_hash, program_id, program_node_id, session_id, created_at, updated_at)
-    VALUES (@id, @title, @status, @currentIndex, @totalSteps, @finalKeyHash, @programId, @programNodeId, @sessionId, @createdAt, @updatedAt)
+    INSERT INTO tasks (id, title, status, current_index, total_steps, final_key_hash, depends_on, program_id, program_node_id, session_id, created_at, updated_at)
+    VALUES (@id, @title, @status, @currentIndex, @totalSteps, @finalKeyHash, @dependsOn, @programId, @programNodeId, @sessionId, @createdAt, @updatedAt)
   `);
 
   const insertStep = db.prepare(`
-    INSERT INTO steps (id, task_id, parent_path, title, path, order_index, depends_on, status, step_key_hash, completed_at, created_at)
-    VALUES (@id, @taskId, @parentPath, @title, @path, @orderIndex, @dependsOn, @status, @stepKeyHash, @completedAt, @createdAt)
+    INSERT INTO steps (id, task_id, parent_path, title, path, order_index, depends_on, status, step_key_hash, current_key, completed_at, created_at)
+    VALUES (@id, @taskId, @parentPath, @title, @path, @orderIndex, @dependsOn, @status, @stepKeyHash, @currentKey, @completedAt, @createdAt)
   `);
 
   const transaction = db.transaction(() => {
@@ -90,6 +92,7 @@ export function createTask(task: TaskRow, steps: StepRow[]): void {
       currentIndex: task.currentIndex,
       totalSteps: task.totalSteps,
       finalKeyHash: task.finalKeyHash,
+      dependsOn: JSON.stringify(task.dependsOn ?? []),
       sessionId: task.sessionId ?? null,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
@@ -106,6 +109,7 @@ export function createTask(task: TaskRow, steps: StepRow[]): void {
         dependsOn: JSON.stringify(step.dependsOn),
         status: step.status,
         stepKeyHash: step.stepKeyHash,
+        currentKey: step.currentKey ?? null,
         completedAt: step.completedAt,
         createdAt: step.createdAt,
       });

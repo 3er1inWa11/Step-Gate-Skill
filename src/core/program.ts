@@ -26,6 +26,7 @@ export interface ProgramNodeInfo {
 export interface NodeTaskDef {
   id?: string;
   title: string;
+  dependsOn?: string[];
   steps: PlanNode[];
 }
 
@@ -109,6 +110,7 @@ export function createProgram(
       const task: TaskRow = {
         id: taskId, title: tDef.title, status: 'active', currentIndex: 1,
         totalSteps: leafSteps.length, finalKeyHash: null,
+        dependsOn: tDef.dependsOn?.map(d => `${programId}_${n.id}_${d}`) ?? [],
         programId, programNodeId: n._nodeId, sessionId: nodeSessionId,
         createdAt: ts, updatedAt: ts,
       };
@@ -117,25 +119,25 @@ export function createProgram(
       const steps: StepRow[] = leafSteps.map((ls, i) => {return {
           id: ls.id, taskId: ls.taskId, parentPath: ls.parentPath, title: ls.title,
           path: ls.path, orderIndex: ls.orderIndex, dependsOn: ls.dependsOn,
-          status: 'pending' as const, stepKeyHash: null, completedAt: null, createdAt: ls.createdAt,
+          status: 'pending' as const, stepKeyHash: null, currentKey: null, completedAt: null, createdAt: ls.createdAt,
         };
       });
 
       // Insert task + steps in transaction
       const insertTask = db.prepare(`
-        INSERT INTO tasks (id, title, status, current_index, total_steps, final_key_hash, program_id, program_node_id, session_id, created_at, updated_at)
-        VALUES (@id, @title, @status, @currentIndex, @totalSteps, @finalKeyHash, @programId, @programNodeId, @sessionId, @createdAt, @updatedAt)
+        INSERT INTO tasks (id, title, status, current_index, total_steps, final_key_hash, depends_on, program_id, program_node_id, session_id, created_at, updated_at)
+        VALUES (@id, @title, @status, @currentIndex, @totalSteps, @finalKeyHash, @dependsOn, @programId, @programNodeId, @sessionId, @createdAt, @updatedAt)
       `);
       const insertStep = db.prepare(`
-        INSERT INTO steps (id, task_id, parent_path, title, path, order_index, depends_on, status, step_key_hash, completed_at, created_at)
-        VALUES (@id, @taskId, @parentPath, @title, @path, @orderIndex, @dependsOn, @status, @stepKeyHash, @completedAt, @createdAt)
+        INSERT INTO steps (id, task_id, parent_path, title, path, order_index, depends_on, status, step_key_hash, current_key, completed_at, created_at)
+        VALUES (@id, @taskId, @parentPath, @title, @path, @orderIndex, @dependsOn, @status, @stepKeyHash, @currentKey, @completedAt, @createdAt)
       `);
 
       db.transaction(() => {
         insertTask.run({
           id: task.id, title: task.title, status: task.status, currentIndex: task.currentIndex,
           totalSteps: task.totalSteps, finalKeyHash: task.finalKeyHash,
-          programId: task.programId ?? null, programNodeId: task.programNodeId ?? null,
+          dependsOn: JSON.stringify(task.dependsOn), programId: task.programId ?? null, programNodeId: task.programNodeId ?? null,
           sessionId: task.sessionId,
           createdAt: task.createdAt, updatedAt: task.updatedAt,
         });
@@ -143,8 +145,8 @@ export function createProgram(
           insertStep.run({
             id: step.id, taskId: step.taskId, parentPath: step.parentPath, title: step.title,
             path: step.path, orderIndex: step.orderIndex, dependsOn: JSON.stringify(step.dependsOn),
-            status: step.status, stepKeyHash: step.stepKeyHash, completedAt: step.completedAt,
-            createdAt: step.createdAt,
+            status: step.status, stepKeyHash: step.stepKeyHash, currentKey: step.currentKey ?? null,
+            completedAt: step.completedAt, createdAt: step.createdAt,
           });
         }
       })();
@@ -254,6 +256,15 @@ export function startProgramNode(programId: string, nodeId: string, sessionId?: 
   ).all(programId, nodeId) as any[];
 
   for (const t of taskRows) {
+    // Check Task-level dependencies
+    const taskDeps: string[] = t.depends_on ? JSON.parse(t.depends_on) : [];
+    if (taskDeps.length > 0) {
+      const incompleteTasks = db.prepare(
+        `SELECT COUNT(*) as cnt FROM tasks WHERE id IN (${taskDeps.map(() => '?').join(',')}) AND status != 'completed'`
+      ).get(...taskDeps) as { cnt: number };
+      if (incompleteTasks.cnt > 0) continue; // skip — Task deps not satisfied
+    }
+
     const allSteps = db.prepare('SELECT * FROM steps WHERE task_id = ? ORDER BY order_index').all(t.id) as any[];
 
     // Check if already has active steps (from program init)
@@ -294,7 +305,7 @@ export function startProgramNode(programId: string, nodeId: string, sessionId?: 
     for (const step of readySteps) {
       const { plaintext, hash } = generateStepKey();
       stepKeys[step.id] = plaintext;
-      db.prepare("UPDATE steps SET status = 'current', step_key_hash = ? WHERE id = ?").run(hash, step.id);
+      db.prepare("UPDATE steps SET status = 'current', step_key_hash = ?, current_key = ? WHERE id = ?").run(hash, plaintext, step.id);
       currentSteps.push({ stepId: step.id, path: step.path, index: step.order_index, total: t.total_steps });
     }
 

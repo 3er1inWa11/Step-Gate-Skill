@@ -300,9 +300,25 @@ step 字段:
 ]}'
 
 三层依赖:
-  Step 级   — dependsOn: ["同Task的stepId"] 或 ["其他Task的id"]（容器引用=等该Task全部完成）
-  Task 级   — 通过 Step 的 dependsOn 引用其他 Task 的 id 实现（Task 本身无独立 dependsOn 字段）
+  Step 级   — dependsOn: ["同Task的stepId"] 
+  Task 级   — dependsOn: ["其他Task的id"]（等该 Task 完成才激活本 Task 的 Step）
   Node 级   — dependsOn: ["其他Node的id"]（Node 完成前不能启动）
+
+嵌套依赖:
+  program init '{
+    "nodes":[{
+      "id":"N0","title":"阶段0","tasks":[
+        {"id":"T0","title":"先行任务","steps":[{"id":"a","title":"A","dependsOn":[]}]},
+        {"id":"T1","title":"后续任务","dependsOn":["T0"],"steps":[
+          // ↑ T1 等 T0 完成后才激活
+          {"id":"b","title":"B","dependsOn":[]}
+        ]}
+      ]
+    },{
+      "id":"N1","title":"阶段1","dependsOn":["N0"],"tasks":[...]}
+      // ↑ N1 等 N0 完成后才能 program start
+    ]
+  }'
 
 输出: {
   ok: true, programId: "pgm_XXX", title: "...", totalNodes: 4,

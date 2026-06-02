@@ -219,20 +219,20 @@ function cmdStartPlan() {
   const task: TaskRow = {
     id: taskId, title: input.title, status: 'active', currentIndex: 1,
     totalSteps: leafSteps.length, finalKeyHash: null,
-    programId: null, programNodeId: null, sessionId: sess.sessionId,
+    dependsOn: [], programId: null, programNodeId: null, sessionId: sess.sessionId,
     createdAt: now, updatedAt: now,
   };
 
   const steps: StepRow[] = leafSteps.map(ls => {
     if (skippedLeafIds.has(ls.id)) {
-      return { id: ls.id, taskId: ls.taskId, parentPath: ls.parentPath, title: ls.title, path: ls.path, orderIndex: ls.orderIndex, dependsOn: ls.dependsOn, status: 'skipped' as const, stepKeyHash: null, completedAt: ts, createdAt: ls.createdAt };
+      return { id: ls.id, taskId: ls.taskId, parentPath: ls.parentPath, title: ls.title, path: ls.path, orderIndex: ls.orderIndex, dependsOn: ls.dependsOn, status: 'skipped' as const, stepKeyHash: null, currentKey: null, completedAt: ts, createdAt: ls.createdAt };
     }
     if (initialCurrent.some(cs => cs.id === ls.id)) {
       const { plaintext, hash } = generateStepKey();
       stepKeys[ls.id] = plaintext;
-      return { id: ls.id, taskId: ls.taskId, parentPath: ls.parentPath, title: ls.title, path: ls.path, orderIndex: ls.orderIndex, dependsOn: ls.dependsOn, status: 'current' as const, stepKeyHash: hash, completedAt: null, createdAt: ls.createdAt };
+      return { id: ls.id, taskId: ls.taskId, parentPath: ls.parentPath, title: ls.title, path: ls.path, orderIndex: ls.orderIndex, dependsOn: ls.dependsOn, status: 'current' as const, stepKeyHash: hash, currentKey: plaintext, completedAt: null, createdAt: ls.createdAt };
     }
-    return { id: ls.id, taskId: ls.taskId, parentPath: ls.parentPath, title: ls.title, path: ls.path, orderIndex: ls.orderIndex, dependsOn: ls.dependsOn, status: 'pending' as const, stepKeyHash: null, completedAt: null, createdAt: ls.createdAt };
+    return { id: ls.id, taskId: ls.taskId, parentPath: ls.parentPath, title: ls.title, path: ls.path, orderIndex: ls.orderIndex, dependsOn: ls.dependsOn, status: 'pending' as const, stepKeyHash: null, currentKey: null, completedAt: null, createdAt: ls.createdAt };
   });
 
   createTask(task, steps);
@@ -313,7 +313,10 @@ function cmdCurrent() {
     status: task.status,
     totalSteps: task.totalSteps,
     completedSteps: getTaskSteps(input.taskId).filter(s => s.status === 'completed').length,
-    currentSteps: steps.map(s => ({ stepId: s.id, path: s.path, index: s.orderIndex, total: task.totalSteps })),
+    currentSteps: steps.map(s => ({
+      stepId: s.id, path: s.path, index: s.orderIndex, total: task.totalSteps,
+      stepKey: s.currentKey ?? undefined,
+    })),
   }));
 }
 
