@@ -16,63 +16,56 @@ work — it only verifies *that you did* what you planned. Think of it as a
 proof-of-work chain for agent steps: every completed step produces a cryptographic key,
 and you cannot finalize a task without the final chain key.
 
-## Hierarchy
+## Hierarchy — Step is the ATOM (mandatory)
 
-Every piece of work in Step Gate lives at exactly one of four levels:
+Step Gate has **exactly four levels**. Step is the smallest unit — no matter what
+level you start from, you MUST design down to Step.
 
 ```
-Program     ← 跨会话的完整项目（如"重构整个后端"）
-  ├─ Node   ← 一个执行阶段（如"Phase 1: 提取中间件"）
-  │   ├─ Task   ← 一次 Agent 交互 = 一个 Task
-  │   │   ├─ Step  ← 一个具体、可验证的动作（如"创建 auth.ts"）
-  │   │   ├─ Step  ← 每个 Step 配一条一次性密钥
-  │   │   └─ Step  ← DAG 依赖决定执行顺序
-  │   └─ Task
-  └─ Node
+                         ┌──────────────────────────────────┐
+  Program    (可选)       │ 跨会话的完整项目                  │
+    │                     │ 例: "后端架构重构"                │
+    │                     │ 包含多个 Node                     │
+    │                     └──────────────────────────────────┘
+    ▼
+                         ┌──────────────────────────────────┐
+  Node       (可选)       │ 一个执行阶段 / 一个波次            │
+    │                     │ 例: "Phase A: 数据库接入"         │
+    │                     │ Node 之间有依赖关系               │
+    │                     │ 一个 Node 包含多个 Task           │
+    │                     └──────────────────────────────────┘
+    ▼
+                         ┌──────────────────────────────────┐
+  Task       (必选)       │ 一次 Agent 交互 = 一个 Task       │
+    │                     │ 例: "OpenSpec 文档"              │
+    │                     │ 一个 Task 包含 1~N 个 Step       │
+    │                     └──────────────────────────────────┘
+    ▼
+                         ┌──────────────────────────────────┐
+  Step       (必选)       │ ⚠ 最小执行原子，不可再拆分       │
+                          │ 例: "写 proposal.md"             │
+                          │ 一个 Step = 一个动作 + 一条密钥   │
+                          │ 完成 ↔ 未完成 二元判断           │
+                          └──────────────────────────────────┘
 ```
 
-- **Program**: 最高层，跨多个会话。Node 全部完成自动传播。
-- **Node**: 一个执行阶段，包含多个 Task。依赖排序决定何时激活。
-- **Task**: 一次交互。一个 Task 包含多个 Step。
-- **Step**: 最小执行单元。一个 Step = 一个具体动作 + 一条密钥。
+**无论从哪个层级起步，最终必须落到 Step 层级。** 哪怕只有一个 Step，也必须用 Task 包住它。
 
-**Step 粒度规则：**
+```
+错误:  "我来重构一下 auth 模块"          ← 没有 Step，无法 checkpoint
+正确:  Task "重构 auth" → Step "提取 middleware" → Step "JWT 验证" → Step "测试"
+```
 
-Steps 必须够细，让 Sub Agent 无法跳步：
+**Step 粒度规则：每一步必须能回答"完成了吗？"**
 
-| 坏 Step | 好 Step |
-|---------|---------|
+| 太粗 (不能用) | 刚好 (可以用) |
+|--------------|-------------|
 | "重构 auth 模块" | "提取 auth middleware 到 src/middleware/auth.ts" |
 | "写测试" | "为 auth.ts 写 3 个单元测试" |
 | "更新文档" | "更新 README 的 Auth 章节" |
+| "修 bug" | "修复 login 页面的空指针异常" |
 
-每个 Step 必须是一个可验证的完成/未完成二元问题。如果一个 Step 包含多个独立动作，拆成多个 Step。
-
-## Why this exists
-
-Long-context agents lose track of plans. A 15-step refactor becomes 12 steps in the
-agent's memory by the time it reaches step 9. Context compression drops the original
-plan. A Sub Agent claims "all done" when it skipped step 7.
-
-The Gate solves this by moving the plan ledger **outside** the agent's context. The plan
-lives in SQLite. Each step is locked behind a 6-character key. The key appears only once
-in the checkpoint response — if the agent loses it, the step cannot be faked.
-
-## Hierarchy — MANDATORY
-
-**If Step Gate is enabled, you MUST use at least Task + Step level.** Even the simplest
-single-step job requires a Task wrapping one Step. There is no way to skip this.
-
-```
-Program     ← 跨会话项目（多 Node 时使用）
-  └─ Node   ← 一个执行阶段/波次
-      └─ Task   ← 一次交互 = 一个 Task（MANDATORY）
-          └─ Step  ← 一个具体动作 + 一条密钥（MANDATORY, 至少 1 个）
-```
-
-**A Task without Steps is invalid.** Every Task needs at least one Step. If your work
-is just "run a command", that's one Step. If it's "refactor three files", that's
-three Steps — each one independently checkpointable.
+如果一个 Step 描述包含"和"、"以及"、"同时"——拆成多个 Step。
 
 ## Core rule — single Task workflow
 
@@ -175,22 +168,203 @@ When ALL steps done: report taskId + taskKey + summary back to Main Agent.
 **Failure to include this template in Sub Agent prompts is the #1 cause of
 Sub Agents not checkpointing.** Always include the full template.
 
-## CLI cheat sheet
+## CLI reference — EVERY command with exact input/output
+
+Each command takes **exactly one JSON string argument** after the command name.
+All output is JSON to stdout. Exit code 0 = success, non-zero = error.
+
+### start-plan — Create a Task with Steps
 
 ```
-node dist/cli.js --help                              Show all commands
+IN:  start-plan '{"title":"任务名","steps":[{"id":"s1","title":"步骤1","dependsOn":[]}]}'
 
-start-plan  '<json>'                                  Create a Task
-checkpoint  '{"taskId":"X","stepId":"Y","stepKey":"K"}' Submit proof
-current     '{"taskId":"X"}'                         Read progress (NO keys)
-finalize    '{"taskId":"X","taskKey":"K"}'            Close completed task
-cancel-task '{"taskId":"X"}'                          Cancel task (session-gated)
-active-task                                           List all active tasks
+step fields:
+  id        — string, optional (auto-generated if omitted)
+  title     — string, REQUIRED
+  dependsOn — string[], optional ([]=immediate, omit=serial, ["a","b"]=merge)
+  children  — PlanNode[], optional (nested sub-steps)
+  skipKey   — string, optional (old key for skip on rebuild)
+  skipTaskId— string, optional (old taskId for skip)
 
-program init   '{"title":"P","nodes":[...]}'          Register full DAG
-program start  '{"programId":"P","nodeId":"N"}'       Activate node + get keys
-program status '{"programId":"P"}'                    Read program progress
-program rebuild '{"programId":"P"}' --confirm          Rebuild after plan changes
+OUT: {
+  ok: true,
+  taskId: "tsk_A1B2C3",
+  session: { sessionId, sessionSecret, recoveryToken, cliInstanceId },
+  totalSteps: 3,
+  currentSteps: [ { stepId: "tsk_A1B2C3_s1", path: "步骤1", index: 1, total: 3 } ],
+  stepKeys: { "tsk_A1B2C3_s1": "X9K2WQ" }
+}
+```
+
+### checkpoint — Complete a step, unlock downstream
+
+```
+IN:  checkpoint '{"taskId":"tsk_XXX","stepId":"tsk_XXX_yy","stepKey":"X9K2WQ"}'
+
+OUT (more steps unlocked): {
+  ok: true,
+  completedStep: { stepId: "tsk_XXX_yy", path: "步骤1" },
+  nextSteps: [ { stepId: "tsk_XXX_zz", path: "步骤2", index: 2, total: 3 } ],
+  nextStepKeys: { "tsk_XXX_zz": "A1B2C3" }
+}
+
+OUT (final step — all done): {
+  ok: true,
+  completedStep: { stepId: "tsk_XXX_zz", path: "最后一步" },
+  allStepsCompleted: true,
+  taskKey: "D4E5F6"     ← SAVE THIS. Report to Main Agent.
+}
+
+OUT (empty — parallel branch waiting): {
+  ok: true,
+  completedStep: { stepId: "...", path: "..." }
+  // no nextSteps — other parallel branch still running
+}
+
+OUT (error): {
+  ok: false, error: "INVALID_STEP_KEY", message: "...",
+  currentStep: { stepId, path, index, total },
+  fix: "node dist/cli.js checkpoint '{\"taskId\":\"...\",...}'"
+}
+```
+
+### current — Read progress (always returns current stepKey)
+
+```
+IN:  current '{"taskId":"tsk_XXX"}'
+
+OUT: {
+  taskId: "tsk_XXX",
+  status: "active",
+  totalSteps: 3,
+  completedSteps: 1,
+  currentSteps: [
+    { stepId: "tsk_XXX_s2", path: "步骤2", index: 2, total: 3,
+      stepKey: "A1B2C3" }   ← current step's plaintext key, always included
+  ]
+}
+
+OUT (not found): { taskId: "...", status: "not_found", currentSteps: [] }
+```
+
+### finalize — Close a completed task
+
+```
+IN:  finalize '{"taskId":"tsk_XXX","taskKey":"D4E5F6"}'
+
+OUT (success): {
+  ok: true, level: "task", taskId: "tsk_XXX", taskStatus: "completed"
+}
+// level may be "task" | "node" | "program" — auto-propagates upward
+
+OUT (rejected — steps not done): {
+  ok: false, status: "active", level: "task",
+  message: "Steps not checkpointed",
+  pendingSteps: [ { stepId, path, index, total } ],
+  fix: "node dist/cli.js checkpoint '{\"taskId\":\"...\",...}'"
+}
+```
+
+### active-task — List active tasks (cross-session by default)
+
+```
+IN:  active-task
+
+OUT: {
+  activeTasks: [
+    { taskId: "tsk_XXX", title: "...", status: "active",
+      sessionId: "ses_XXX", totalSteps: 3,
+      completedSteps: 1,
+      currentSteps: [ { stepId, path, index, total } ]
+    }
+  ]
+}
+```
+
+### cancel-task — Cancel a task
+
+```
+IN:  cancel-task '{"taskId":"tsk_XXX"}'
+
+OUT: { ok: true, message: "Task cancelled." }
+// Session-gated. Cross-session requires --admin --recovery-token <token>
+```
+
+### program init — Register full Program→Node→Task→Step DAG
+
+```
+IN:  program init '{"title":"项目名","nodes":[
+  {"id":"wave0","title":"阶段0","tasks":[
+    {"id":"T0","title":"任务0","steps":[
+      {"id":"s1","title":"步骤1","dependsOn":[]}
+    ]}
+  ]},
+  {"id":"wave1","title":"阶段1","dependsOn":["wave0"],"tasks":[...]}
+]}'
+
+node fields:
+  id         — string, optional (prefixed with programId)
+  title      — string, REQUIRED
+  dependsOn  — string[], optional (node-level deps)
+  tasks      — NodeTaskDef[], optional (bulk-register tasks)
+    task fields:
+      id     — string, optional (prefixed: programId_nodeId_taskId)
+      title  — string, REQUIRED
+      steps  — PlanNode[], REQUIRED (same as start-plan steps)
+
+OUT: {
+  ok: true, programId: "pgm_XXX", title: "...", totalNodes: 4,
+  nodes: [ { nodeId: "pgm_XXX_wave0", title: "...", orderIndex: 1, status: "pending" } ],
+  tasks: [
+    { taskId: "pgm_XXX_wave0_T0", nodeId: "pgm_XXX_wave0", title: "...",
+      totalSteps: 3, currentSteps: [], stepKeys: {} }
+  ]
+}
+// All tasks start pending. stepKeys are EMPTY — use program start to activate.
+```
+
+### program start — Activate a node's tasks, get stepKeys
+
+```
+IN:  program start '{"programId":"pgm_XXX","nodeId":"pgm_XXX_wave0"}'
+
+OUT (success): {
+  ok: true, nodeId: "pgm_XXX_wave0", sessionId: "ses_XXX",
+  tasks: [
+    { taskId: "pgm_XXX_wave0_T0", nodeId: "pgm_XXX_wave0",
+      title: "任务0", totalSteps: 3,
+      currentSteps: [ { stepId: "pgm_XXX_wave0_T0_s1", path: "步骤1", index: 1, total: 3 } ],
+      stepKeys: { "pgm_XXX_wave0_T0_s1": "X9K2WQ" }
+    }
+  ]
+}
+
+OUT (blocked — node deps unsatisfied): {
+  ok: false, error: "NODE_NOT_READY",
+  message: "Node has 1 unsatisfied dependencies",
+  fix: "node dist/cli.js program status '{\"programId\":\"...\"}'"
+}
+```
+
+### program status — Read program progress
+
+```
+IN:  program status '{"programId":"pgm_XXX"}'
+
+OUT: {
+  ok: true, programId: "pgm_XXX", title: "...",
+  nodes: [ { nodeId, title, orderIndex, status } ]
+}
+```
+
+### program rebuild — Rebuild after plan changes
+
+```
+IN:  program rebuild '{"programId":"pgm_XXX"}'          # dry-run
+     program rebuild '{"programId":"pgm_XXX"}' --confirm # execute
+
+OUT (dry-run): { ok: true, dryRun: true, scope, completedSteps, pendingSteps, ... }
+OUT (confirm): { ok: true, confirmed: true, cancelledTasks: N, resetNodes: [...] }
 ```
 
 ## DAG rules
