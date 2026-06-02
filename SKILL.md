@@ -124,105 +124,73 @@ After completing each step, immediately call `checkpoint` with the step's key. D
 batch checkpoints, do NOT wait for the Hook to remind you. The Hook is a safety net,
 not your workflow. If you see `ACTION REQUIRED`, stop everything and resolve it.
 
-## CLI reference
+## Large DAG registration — write JSON to file first
 
-All commands return JSON. The CLI binary is at `node dist/cli.js` from the project root.
+For programs with many Nodes/Tasks/Steps (e.g. 29 Tasks, 145 Steps), the Bash argument
+limit may truncate the JSON. **Always write large JSON to a temp file first:**
 
-### Task commands
-
-**start-plan** — Create a task for this interaction
 ```bash
-node dist/cli.js start-plan '{"title":"What this task does","steps":[...]}'
-```
-Each step: `id` (optional), `title` (required), `dependsOn` (string array or omit for
-auto-serial), `children` (nested container). First call auto-creates session files.
-Returns `taskId`, `currentSteps`, and `stepKeys`.
+# Write the program DAG to a file
+cat > /tmp/dag.json << 'EOF'
+{"title":"...","nodes":[...]}
+EOF
 
-**checkpoint** — Complete a step and unlock its dependents
-```bash
-node dist/cli.js checkpoint '{"taskId":"tsk_XXX","stepId":"tsk_XXX_yy","stepKey":"KEY"}'
-```
-The key is consumed on use — it cannot be reused. Returns `nextSteps` + `nextStepKeys`
-for newly unlocked steps. When all steps are done, returns `allStepsCompleted: true` and
-a `taskKey`.
-
-**current** — Read current progress (does NOT return keys)
-```bash
-node dist/cli.js current '{"taskId":"tsk_XXX"}'
+# Register from file
+node dist/cli.js program init "$(cat /tmp/dag.json)"
 ```
 
-**finalize** — Complete the task and auto-propagate upward
-```bash
-node dist/cli.js finalize '{"taskId":"tsk_XXX","taskKey":"KEY"}'
+Never inline a JSON exceeding ~10 lines in a Bash command. Write to file, then `cat`.
+
+## Weaver protocol — MANDATORY for Sub Agent dispatch
+
+**When you spawn a Sub Agent, you MUST copy the dispatch template below into the
+Sub Agent's prompt.** The Sub Agent cannot discover its task or keys on its own.
+
 ```
-Verifies the taskKey, marks the task completed, then automatically checks whether the
-parent Node (if any) and Program are also complete. Returns a `level` field: `task`,
-`node`, or `program`.
+⛔ READ THIS FIRST — You are a Sub Agent under Step Gate.
 
-**cancel-task** — Cancel the current session's task
-```bash
-node dist/cli.js cancel-task '{"taskId":"tsk_XXX"}'
-```
-Session-gated — you can only cancel your own tasks. Cross-session cancel requires
-`--admin --recovery-token <token>`.
+Workspace: <PROJECT_ROOT>
+CLI: node dist/cli.js
 
-**active-task** — List active tasks (cross-session by default)
-```bash
-node dist/cli.js active-task              # all sessions (default)
-node dist/cli.js active-task --mine       # current session only
-```
+Your task was pre-registered with Step Gate. You do NOT create tasks.
 
-### Program commands (cross-session projects)
+ASSIGNED STEPS:
+  Task ID: <taskId>
+  Step: <stepId> — "<description>" — Key: <stepKey>
 
-**program init** — Register the full DAG in one command. Nodes may optionally include tasks+steps
-for bulk registration. Ready nodes (no deps) have their first steps activated immediately.
-```bash
-node dist/cli.js program init '{
-  "title":"Phase 7 — Audit Fixes",
-  "nodes":[
-    {"id":"wave0","title":"Docs","tasks":[
-      {"id":"F0","title":"OpenSpec","steps":[
-        {"id":"S0.1","title":"proposal.md","dependsOn":[]},
-        {"id":"S0.2","title":"tasks.md","dependsOn":["S0.1"]}
-      ]}
-    ]},
-    {"id":"wave1","title":"Fixes","dependsOn":["wave0"],"tasks":[
-      {"id":"F1","title":"Fix auth","steps":[
-        {"id":"S1.1","title":"Edit","dependsOn":[]}
-      ]}
-    ]}
-  ]
-}'
-```
-Returns `programId`, `nodes`, `tasks` with `taskId` + `currentSteps` + `stepKeys` for ready tasks.
+RULES:
+1. cd <PROJECT_ROOT> before any step-gate command
+2. Complete your step, then immediately checkpoint:
+   node dist/cli.js checkpoint '{"taskId":"<taskId>","stepId":"<stepId>","stepKey":"<stepKey>"}'
+3. The checkpoint response gives nextSteps + nextStepKeys if more steps unlock
+4. When checkpoint returns allStepsCompleted=true + taskKey, STOP and report the taskKey
+5. Use node dist/cli.js current '{"taskId":"<taskId>"}' to check progress
+6. NEVER call finalize — that is the Main Agent's job
+7. NEVER call start-plan, cancel-task, or program commands
+8. Keys appear ONCE. If you lose a key, report to Main Agent immediately.
 
-**program start** — Activate a node's pre-registered tasks. Returns task credentials for dispatch.
-```bash
-node dist/cli.js program start '{"programId":"pgm_XXX","nodeId":"pgm_XXX_wave1"}'
-```
-Returns `tasks` array with `taskId`, `currentSteps`, and `stepKeys` — ready for Sub Agent dispatch.
-
-**program status** — Read program progress
-```bash
-node dist/cli.js program status '{"programId":"pgm_XXX"}'
+When ALL steps done: report taskId + taskKey + summary back to Main Agent.
 ```
 
-Program finalization is automatic — when the last Task in the last Node is finalized,
-the system propagates completion all the way up. No manual `program finalize` needed.
+**Failure to include this template in Sub Agent prompts is the #1 cause of
+Sub Agents not checkpointing.** Always include the full template.
 
-**program rebuild** — Rebuild node/program after plan changes (dry-run first, then `--confirm`)
-```bash
-node dist/cli.js program rebuild '{"programId":"pgm_XXX"}'          # dry-run
-node dist/cli.js program rebuild '{"programId":"pgm_XXX"}' --confirm
+## CLI cheat sheet
+
 ```
+node dist/cli.js --help                              Show all commands
 
-Always show the user the dry-run output and get confirmation before running `--confirm`.
+start-plan  '<json>'                                  Create a Task
+checkpoint  '{"taskId":"X","stepId":"Y","stepKey":"K"}' Submit proof
+current     '{"taskId":"X"}'                         Read progress (NO keys)
+finalize    '{"taskId":"X","taskKey":"K"}'            Close completed task
+cancel-task '{"taskId":"X"}'                          Cancel task (session-gated)
+active-task                                           List all active tasks
 
-### Diagnostics
-
-```bash
-node dist/cli.js gate reconcile                   # full read-only health check
-node dist/cli.js gate reconcile '{"programId":"pgm_XXX"}'  # scoped to one program
+program init   '{"title":"P","nodes":[...]}'          Register full DAG
+program start  '{"programId":"P","nodeId":"N"}'       Activate node + get keys
+program status '{"programId":"P"}'                    Read program progress
+program rebuild '{"programId":"P"}' --confirm          Rebuild after plan changes
 ```
 
 ## DAG rules

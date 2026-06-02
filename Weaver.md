@@ -16,49 +16,40 @@ The Main Agent injects precisely what each Sub Agent needs. No more, no less.
 
 ## Main Agent → Sub Agent dispatch template
 
-**Before dispatching:** The Main Agent MUST break the work into concrete, verifiable Steps (see SKILL.md Step granularity rules). Each Step should be one specific action. Never dispatch a Sub Agent with a single vague step like "do the work."
+**⛔ HARD RULE: Every Sub Agent prompt MUST include the dispatch block below.
+Sub Agents without this template will NOT checkpoint — they don't know the commands.**
 
-Copy this into the Sub Agent's prompt when spawning. Replace `{{...}}` placeholders:
+1. Break work into concrete, verifiable Steps (see SKILL.md Step granularity rules)
+2. **Copy the dispatch block verbatim** — replace placeholders, but keep all rules
+3. Inject taskId + stepKeys for the Sub Agent's assigned steps
+4. Never dispatch a Sub Agent with a vague step like "do the work"
 
 ```
-You are working under Step Gate. A task has already been created for you.
+⛔ Sub Agent Dispatch — include this block in EVERY Sub Agent prompt:
 
-**Task ID**: {{taskId}}
-**Goal**: {{taskGoal}}
-**Workspace**: {{workspacePath}}
+You are working under Step Gate. Your task was pre-registered.
 
-**Your assigned steps and their keys:**
+Task ID: {{taskId}}
+Goal: {{taskGoal}}
+Workspace: {{workspacePath}}
+
+Assigned steps and their keys:
 {{#each currentSteps}}
-  - Step: {{stepId}} → "{{path}}" → Key: {{stepKey}}
+  Step: {{stepId}} — "{{path}}" — Key: {{stepKey}}
 {{/each}}
 
-**Rules:**
-1. **You MUST run all step-gate commands from the workspace directory.** The database
-   is stored at `{{workspacePath}}/.step-gate/gate.db`. If you run from a different
-   directory, you will NOT find the task.
-   ```bash
-   cd {{workspacePath}}
-   # then run step-gate commands
-   ```
-2. Execute one step at a time. After completing a step, run:
-   step-gate checkpoint '{"taskId":"{{taskId}}","stepId":"<stepId>","stepKey":"<stepKey>"}'
-3. The checkpoint response will give you nextSteps + nextStepKeys if downstream
-   steps are now unlocked. Use those keys to continue.
-4. If checkpoint returns allStepsCompleted: true, you will receive a taskKey.
-   STOP and report it back — do NOT call finalize yourself.
-5. If checkpoint returns an empty nextSteps list, there may be parallel branches
-   still running. Wait for the Main Agent to tell you to proceed.
-6. NEVER call the current command expecting to get keys back — it does NOT
-   return keys. Keys only appear in start-plan and checkpoint responses.
+RULES:
+1. cd {{workspacePath}} before any step-gate command
+2. Complete a step, then checkpoint:
+   node dist/cli.js checkpoint '{"taskId":"{{taskId}}","stepId":"<stepId>","stepKey":"<stepKey>"}'
+3. Checkpoint response gives nextSteps + nextStepKeys if more steps unlock
+4. When checkpoint returns allStepsCompleted=true, you get a taskKey — report it
+5. Use node dist/cli.js current '{"taskId":"{{taskId}}"}' to check progress
+6. NEVER call finalize — Main Agent's job
+7. NEVER call start-plan, cancel-task, or program commands
+8. Keys appear ONCE — lost key = report immediately
 
-**When you finish all your steps:**
-Report back to the Main Agent:
-  - taskId: {{taskId}}
-  - taskKey: <from the final checkpoint>
-  - summary: what you accomplished
-  - artifacts: list of files changed/created
-
-The Main Agent will verify your taskKey with finalize.
+When all steps done: report taskId + taskKey + summary back to Main Agent.
 ```
 
 ## Sub Agent execution loop (what it actually does)
