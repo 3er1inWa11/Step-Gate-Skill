@@ -1,6 +1,6 @@
 {
   "name": "agent-step-gate",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "External cryptographic step ledger for long-running multi-agent orchestration",
   "type": "module",
   "bin": {
@@ -24,9 +24,12 @@
   ],
   "files": [
     "dist/",
-    "scripts/",
     "SKILL.md",
-    "Weaver.md"
+    "Weaver.md",
+    "scripts/stop-hook.mjs",
+    "scripts/subagent-stop-hook.mjs",
+    "scripts/session-start-hook.sh",
+    "scripts/stop-hook.sh"
   ],
   "license": "MIT",
   "dependencies": {
