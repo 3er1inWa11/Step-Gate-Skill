@@ -208,18 +208,31 @@ export function startProgramNode(programId: string, nodeId: string, sessionId?: 
   const ts = now();
 
   if (!existingSession) {
-    db.prepare('INSERT INTO sessions (session_id, session_secret_hash, recovery_token_hash, workspace, program_id, program_node_id, created_by_cli, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(sid, sha256(randomCode(6)), sha256(randomCode(6)), process.cwd(), programId, nodeId, 'program_start', ts, ts);
+    // Upsert: session may already exist from ensureSession() in CLI
+    const alreadyExists = db.prepare('SELECT 1 FROM sessions WHERE session_id = ?').get(sid);
+    if (alreadyExists) {
+      db.prepare('UPDATE sessions SET program_id = ?, program_node_id = ?, updated_at = ? WHERE session_id = ?')
+        .run(programId, nodeId, ts, sid);
+    } else {
+      db.prepare('INSERT INTO sessions (session_id, session_secret_hash, recovery_token_hash, workspace, program_id, program_node_id, created_by_cli, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(sid, sha256(randomCode(6)), sha256(randomCode(6)), process.cwd(), programId, nodeId, 'program_start', ts, ts);
+    }
   }
 
   db.prepare("UPDATE program_nodes SET status = 'in_progress', session_id = ? WHERE node_id = ?")
     .run(sid, nodeId);
 
-  // Return pre-registered tasks under this node's session.
-  // If they already have current steps (from program init for a ready node), return those.
-  // Otherwise activate the first pending steps.
+  // Find pre-registered tasks for this node via session linkage.
+  // Tasks were created under a program_init session for this node.
+  // Query by sessions linked to this program+node, not by caller's session.
   const tasks: ProgramTaskInfo[] = [];
-  const taskRows = db.prepare("SELECT * FROM tasks WHERE session_id = ? AND status = 'active' ORDER BY created_at").all(sid) as any[];
+  const taskRows = db.prepare(
+    `SELECT t.* FROM tasks t
+     JOIN sessions s ON t.session_id = s.session_id
+     WHERE s.program_id = ? AND s.program_node_id = ?
+     AND t.status = 'active'
+     ORDER BY t.created_at`
+  ).all(programId, nodeId) as any[];
 
   for (const t of taskRows) {
     const allSteps = db.prepare('SELECT * FROM steps WHERE task_id = ? ORDER BY order_index').all(t.id) as any[];

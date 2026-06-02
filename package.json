@@ -1,6 +1,6 @@
 {
   "name": "agent-step-gate",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "External cryptographic step ledger for long-running multi-agent orchestration",
   "type": "module",
   "bin": {
