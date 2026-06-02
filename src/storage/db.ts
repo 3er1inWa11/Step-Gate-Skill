@@ -1,7 +1,6 @@
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, copyFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 // Walk up from CWD to find the nearest .step-gate/ workspace directory.
 // This allows Sub Agents running from subdirectories to find the correct DB.
@@ -19,19 +18,6 @@ function findWorkspace(startDir: string): string {
 
 const WORKSPACE = findWorkspace(process.cwd());
 const DB_PATH = resolve(WORKSPACE, '.step-gate', 'gate.db');
-
-// Migrate from old package-relative DB
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const OLD_DB = resolve(__dirname, '..', '..', 'data', 'gate.db');
-if (existsSync(OLD_DB) && !existsSync(DB_PATH)) {
-  try {
-    mkdirSync(dirname(DB_PATH), { recursive: true });
-    copyFileSync(OLD_DB, DB_PATH);
-    for (const ext of ['-wal', '-shm']) {
-      if (existsSync(OLD_DB + ext)) copyFileSync(OLD_DB + ext, DB_PATH + ext);
-    }
-  } catch { /* migration best-effort */ }
-}
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
 
