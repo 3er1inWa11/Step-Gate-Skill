@@ -58,135 +58,127 @@ level you start from, you MUST design down to Step.
 
 **Step 粒度规则：每一步必须能回答"完成了吗？"**
 
-| 太粗 (不能用) | 刚好 (可以用) |
-|--------------|-------------|
+| 太粗 (不能用)     | 刚好 (可以用)                                      |
+| ------------ | --------------------------------------------- |
 | "重构 auth 模块" | "提取 auth middleware 到 src/middleware/auth.ts" |
-| "写测试" | "为 auth.ts 写 3 个单元测试" |
-| "更新文档" | "更新 README 的 Auth 章节" |
-| "修 bug" | "修复 login 页面的空指针异常" |
+| "写测试"        | "为 auth.ts 写 3 个单元测试"                         |
+| "更新文档"       | "更新 README 的 Auth 章节"                         |
+| "修 bug"      | "修复 login 页面的空指针异常"                           |
 
 如果一个 Step 描述包含"和"、"以及"、"同时"——拆成多个 Step。
 
-## Core rule — single Task workflow
+## 核心规则 — 单 Task 工作流
 
-For simple work that fits in one interaction:
+适合一次交互完成的工作：
 
-1. **Plan** — break the work into concrete Steps with DAG dependencies
-2. **Show the DAG to the user** — present the full step plan before calling `start-plan`
-3. **Get confirmation** — user must explicitly approve the plan
-4. **Register** — call `start-plan` to lock the plan in the external ledger
-5. **Execute** — checkpoint each Step as you complete it
-6. **Finalize** — submit the taskKey to close the Task
-
-```
-Plan → Show DAG → User confirms → start-plan → checkpoint × N → finalize(taskKey) → done
-```
-
-## Core rule — multi-wave Program workflow
-
-For work spanning multiple nodes/phases (cross-session or multi-agent):
+1. **规划** — 把工作拆成具体的 Step，定义 DAG 依赖
+2. **展示 DAG 给用户** — 在调用 `start-plan` 之前展示完整步骤计划
+3. **获取确认** — 用户必须明确批准计划
+4. **注册** — 调用 `start-plan` 将计划锁定到外部账本
+5. **执行** — 每完成一个 Step 立即 checkpoint
+6. **关闭** — 提交 taskKey 关闭 Task
 
 ```
-program init → show DAG → user confirms
+规划 → 展示 DAG → 用户确认 → start-plan → checkpoint × N → finalize(taskKey) → 完成
+```
+
+## 核心规则 — 多 Wave Program 工作流
+
+适合跨会话、多阶段、多 Agent 协同的工作：
+
+```
+program init → 展示 DAG → 用户确认
   ↓
   ┌─────────────────────────────────────────────────────┐
-  │  For EACH Wave (Node):                              │
-  │    program start <node>  →  activates tasks         │
+  │  每个 Wave (Node) 循环:                              │
+  │    program start <node>  →  激活任务                 │
   │    ↓                                                │
-  │    Main Agent dispatches Sub Agents                 │
-  │    (inject taskId + stepKeys per Weaver protocol)   │
+  │    Main Agent 派发 Sub Agent                        │
+  │    (按 Weaver 协议注入 taskId + stepKeys)            │
   │    ↓                                                │
-  │    Sub Agent(s) → checkpoint × N → taskKey          │
+  │    Sub Agent → checkpoint × N → taskKey              │
   │    ↓                                                │
   │    Main Agent → finalize(taskId, taskKey)            │
   │    ↓                                                │
-  │    When all tasks in node are done → node complete   │
+  │    Node 内所有 Task 完成 → Node 自动完成             │
   │    ↓                                                │
-  │    User manually starts next wave:                  │
+  │    用户手动启动下一波:                               │
   │    program start <next-node>                        │
   └─────────────────────────────────────────────────────┘
 ```
 
-**Each wave requires an explicit `program start`.** Waves do NOT auto-unlock — this is
-intentional. A single interaction should not cascade through all waves automatically
-(the Stop Hook would never let the session end).
+**每个 Wave 需要显式 `program start`。** Wave 不会自动级联——这是刻意设计。一次交互不应该自动跑完所有 Wave（Stop Hook 永远不会让会话结束）。
 
-## Proactive checkpointing
+## 主动 Checkpoint
 
-After completing each step, immediately call `checkpoint` with the step's key. Do NOT
-batch checkpoints, do NOT wait for the Hook to remind you. The Hook is a safety net,
-not your workflow. If you see `ACTION REQUIRED`, stop everything and resolve it.
+每完成一个 Step，立即调用 `checkpoint` 并出示密钥。不要批量 checkpoint，不要等 Hook 来提醒。Hook 是安全网，不是工作流。看到 `ACTION REQUIRED`，立刻停下来解决。
 
-## Large DAG registration — write JSON to file first
+## 大 DAG 注册 — 先写文件再注册
 
-For programs with many Nodes/Tasks/Steps (e.g. 29 Tasks, 145 Steps), the Bash argument
-limit may truncate the JSON. **Always write large JSON to a temp file first:**
+当 Program 包含大量 Node/Task/Step 时（如 29 个 Task、145 个 Step），Bash 参数长度限制可能截断 JSON。**始终先把 JSON 写到临时文件：**
 
 ```bash
-# Write the program DAG to a file
+# 把 Program DAG 写到文件
 cat > /tmp/dag.json << 'EOF'
 {"title":"...","nodes":[...]}
 EOF
 
-# Register from file
+# 从文件注册
 node dist/cli.js program init "$(cat /tmp/dag.json)"
 ```
 
-Never inline a JSON exceeding ~10 lines in a Bash command. Write to file, then `cat`.
+超过 ~10 行的 JSON 不要直接内联到 Bash 命令中。写文件，然后 `cat`。
 
-## Weaver protocol — MANDATORY for Sub Agent dispatch
+## Weaver 协议 — 派发 Sub Agent 时必须复制此模板
 
-**When you spawn a Sub Agent, you MUST copy the dispatch template below into the
-Sub Agent's prompt.** The Sub Agent cannot discover its task or keys on its own.
+**派发 Sub Agent 时，必须把下面的派发模板复制到 Sub Agent 的 Prompt 中。** Sub Agent 无法自行发现任务或密钥。
 
 ```
-⛔ READ THIS FIRST — You are a Sub Agent under Step Gate.
+⛔ 先读这里 — 你是 Step Gate 下的 Sub Agent
 
-Workspace: <PROJECT_ROOT>
-CLI: node dist/cli.js
+工作目录: <项目根目录>
+CLI 命令: node dist/cli.js
 
-Your task was pre-registered with Step Gate. You do NOT create tasks.
+你的任务已由 Main Agent 预注册。你不需要创建任务。
 
-ASSIGNED STEPS:
-  Task ID: <taskId>
-  Step: <stepId> — "<description>" — Key: <stepKey>
+当前分配的步骤:
+  任务 ID: <taskId>
+  步骤: <stepId> — "<步骤描述>" — 密钥: <stepKey>
 
-RULES:
-1. cd <PROJECT_ROOT> before any step-gate command
-2. Complete your step, then immediately checkpoint:
+规则:
+1. 先 cd <项目根目录> 再执行任何 step-gate 命令
+2. 完成当前步骤后，立即 checkpoint:
    node dist/cli.js checkpoint '{"taskId":"<taskId>","stepId":"<stepId>","stepKey":"<stepKey>"}'
-3. The checkpoint response gives nextSteps + nextStepKeys if more steps unlock
-4. When checkpoint returns allStepsCompleted=true + taskKey, STOP and report the taskKey
-5. Use node dist/cli.js current '{"taskId":"<taskId>"}' to check progress
-6. NEVER call finalize — that is the Main Agent's job
-7. NEVER call start-plan, cancel-task, or program commands
-8. Keys appear ONCE. If you lose a key, report to Main Agent immediately.
+3. checkpoint 响应中 nextSteps + nextStepKeys 表示解锁的下一步
+4. checkpoint 返回 allStepsCompleted=true + taskKey 时，停止并回报 taskKey
+5. 用 node dist/cli.js current '{"taskId":"<taskId>"}' 查看进度（会返回当前 stepKey）
+6. 永远不要调用 finalize — 那是 Main Agent 的职责
+7. 永远不要调用 start-plan、cancel-task、program 命令
+8. stepKey 明文存储在 DB 中，可通过 current 命令恢复
 
-When ALL steps done: report taskId + taskKey + summary back to Main Agent.
+全部步骤完成后: 回报 taskId + taskKey + 完成摘要给 Main Agent
 ```
 
-**Failure to include this template in Sub Agent prompts is the #1 cause of
-Sub Agents not checkpointing.** Always include the full template.
+**不在 Sub Agent Prompt 中包含此模板，是 Sub Agent 不 checkpoint 的第一大原因。** 始终复制完整模板。
 
-## CLI reference — EVERY command with exact input/output
+## CLI 完整参考 — 每个命令的精确输入/输出
 
-Each command takes **exactly one JSON string argument** after the command name.
-All output is JSON to stdout. Exit code 0 = success, non-zero = error.
+所有命令都接受**恰好一个 JSON 字符串参数**（跟在命令名后面）。所有输出都是 JSON 到 stdout。退出码 0 = 成功，非零 = 错误。
 
-### start-plan — Create a Task with Steps
+### start-plan — 创建 Task 和 Step
 
 ```
-IN:  start-plan '{"title":"任务名","steps":[{"id":"s1","title":"步骤1","dependsOn":[]}]}'
+输入:  start-plan '{"title":"任务名","steps":[{"id":"s1","title":"步骤1","dependsOn":[]}]}'
 
-step fields:
-  id        — string, optional (auto-generated if omitted)
-  title     — string, REQUIRED
-  dependsOn — string[], optional ([]=immediate, omit=serial, ["a","b"]=merge)
-  children  — PlanNode[], optional (nested sub-steps)
-  skipKey   — string, optional (old key for skip on rebuild)
-  skipTaskId— string, optional (old taskId for skip)
+step 字段:
+  id         — 字符串，可选（不填自动生成）
+  title      — 字符串，必填
+  dependsOn  — 字符串数组，可选（[]=立即激活, 省略=串行, ["a","b"]=合并点）
+  children   — PlanNode[]，可选（嵌套子步骤）
+  skipKey    — 字符串，可选（中断恢复时跳过已完成步骤的旧密钥）
+  skipTaskId — 字符串，可选（skipKey 对应的旧 taskId）
 
-OUT: {
+输出: {
   ok: true,
   taskId: "tsk_A1B2C3",
   session: { sessionId, sessionSecret, recoveryToken, cliInstanceId },
@@ -196,81 +188,81 @@ OUT: {
 }
 ```
 
-### checkpoint — Complete a step, unlock downstream
+### checkpoint — 完成一个步骤，解锁后续步骤
 
 ```
-IN:  checkpoint '{"taskId":"tsk_XXX","stepId":"tsk_XXX_yy","stepKey":"X9K2WQ"}'
+输入:  checkpoint '{"taskId":"tsk_XXX","stepId":"tsk_XXX_yy","stepKey":"X9K2WQ"}'
 
-OUT (more steps unlocked): {
+输出 (有后续步骤): {
   ok: true,
   completedStep: { stepId: "tsk_XXX_yy", path: "步骤1" },
   nextSteps: [ { stepId: "tsk_XXX_zz", path: "步骤2", index: 2, total: 3 } ],
   nextStepKeys: { "tsk_XXX_zz": "A1B2C3" }
 }
 
-OUT (final step — all done): {
+输出 (最后一步 — 全部完成): {
   ok: true,
   completedStep: { stepId: "tsk_XXX_zz", path: "最后一步" },
   allStepsCompleted: true,
-  taskKey: "D4E5F6"     ← SAVE THIS. Report to Main Agent.
+  taskKey: "D4E5F6"     ← 保存此密钥，回报给 Main Agent
 }
 
-OUT (empty — parallel branch waiting): {
+输出 (并行分支等待): {
   ok: true,
   completedStep: { stepId: "...", path: "..." }
-  // no nextSteps — other parallel branch still running
+  // 没有 nextSteps — 其他并行分支还在执行
 }
 
-OUT (error): {
-  ok: false, error: "INVALID_STEP_KEY", message: "...",
+输出 (错误): {
+  ok: false, error: "INVALID_STEP_KEY", message: "密钥不匹配",
   currentStep: { stepId, path, index, total },
-  fix: "node dist/cli.js checkpoint '{\"taskId\":\"...\",...}'"
+  fix: "node dist/cli.js checkpoint '{\"taskId\":\"...\",\"stepId\":\"...\",\"stepKey\":\"...\"}'"
 }
 ```
 
-### current — Read progress (always returns current stepKey)
+### current — 查看进度（始终返回当前 stepKey，用于中断恢复）
 
 ```
-IN:  current '{"taskId":"tsk_XXX"}'
+输入:  current '{"taskId":"tsk_XXX"}'
 
-OUT: {
+输出: {
   taskId: "tsk_XXX",
   status: "active",
   totalSteps: 3,
   completedSteps: 1,
   currentSteps: [
     { stepId: "tsk_XXX_s2", path: "步骤2", index: 2, total: 3,
-      stepKey: "A1B2C3" }   ← current step's plaintext key, always included
+      stepKey: "A1B2C3" }   ← 当前步骤的明文密钥，始终返回
   ]
 }
 
-OUT (not found): { taskId: "...", status: "not_found", currentSteps: [] }
+输出 (未找到): { taskId: "...", status: "not_found", currentSteps: [] }
 ```
 
-### finalize — Close a completed task
+### finalize — 关闭已完成的 Task
 
 ```
-IN:  finalize '{"taskId":"tsk_XXX","taskKey":"D4E5F6"}'
+输入:  finalize '{"taskId":"tsk_XXX","taskKey":"D4E5F6"}'
 
-OUT (success): {
+输出 (成功): {
   ok: true, level: "task", taskId: "tsk_XXX", taskStatus: "completed"
 }
-// level may be "task" | "node" | "program" — auto-propagates upward
+// level 可能为 "task" | "node" | "program" — 自动向上传播
 
-OUT (rejected — steps not done): {
+输出 (拒绝 — 步骤未完成): {
   ok: false, status: "active", level: "task",
   message: "Steps not checkpointed",
   pendingSteps: [ { stepId, path, index, total } ],
-  fix: "node dist/cli.js checkpoint '{\"taskId\":\"...\",...}'"
+  fix: "node dist/cli.js checkpoint '{\"taskId\":\"...\",\"stepId\":\"...\",\"stepKey\":\"...\"}'"
 }
 ```
 
-### active-task — List active tasks (cross-session by default)
+### active-task — 列出所有活跃 Task（默认跨 Session）
 
 ```
-IN:  active-task
+输入:  active-task
 
-OUT: {
+输出: {
   activeTasks: [
     { taskId: "tsk_XXX", title: "...", status: "active",
       sessionId: "ses_XXX", totalSteps: 3,
@@ -281,19 +273,19 @@ OUT: {
 }
 ```
 
-### cancel-task — Cancel a task
+### cancel-task — 取消一个 Task
 
 ```
-IN:  cancel-task '{"taskId":"tsk_XXX"}'
+输入:  cancel-task '{"taskId":"tsk_XXX"}'
 
-OUT: { ok: true, message: "Task cancelled." }
-// Session-gated. Cross-session requires --admin --recovery-token <token>
+输出: { ok: true, message: "Task cancelled." }
+// Session 门控。跨 Session 取消需要 --admin --recovery-token <token>
 ```
 
-### program init — Register full Program→Node→Task→Step DAG
+### program init — 一次性注册完整 Program→Node→Task→Step DAG
 
 ```
-IN:  program init '{"title":"项目名","nodes":[
+输入:  program init '{"title":"项目名","nodes":[
   {"id":"wave0","title":"阶段0","tasks":[
     {"id":"T0","title":"任务0","steps":[
       {"id":"s1","title":"步骤1","dependsOn":[]}
@@ -302,17 +294,17 @@ IN:  program init '{"title":"项目名","nodes":[
   {"id":"wave1","title":"阶段1","dependsOn":["wave0"],"tasks":[...]}
 ]}'
 
-node fields:
-  id         — string, optional (prefixed with programId)
-  title      — string, REQUIRED
-  dependsOn  — string[], optional (node-level deps)
-  tasks      — NodeTaskDef[], optional (bulk-register tasks)
-    task fields:
-      id     — string, optional (prefixed: programId_nodeId_taskId)
-      title  — string, REQUIRED
-      steps  — PlanNode[], REQUIRED (same as start-plan steps)
+node 字段:
+  id         — 字符串，可选（自动加 programId 前缀）
+  title      — 字符串，必填
+  dependsOn  — 字符串数组，可选（Node 级依赖，对应的 Node 完成前不能启动）
+  tasks      — 任务数组，可选（批量预注册 Task）
+    每个 task:
+      id     — 字符串，可选（前缀: programId_nodeId_taskId）
+      title  — 字符串，必填
+      steps  — PlanNode[]，必填（格式同 start-plan 的 steps）
 
-OUT: {
+输出: {
   ok: true, programId: "pgm_XXX", title: "...", totalNodes: 4,
   nodes: [ { nodeId: "pgm_XXX_wave0", title: "...", orderIndex: 1, status: "pending" } ],
   tasks: [
@@ -320,15 +312,15 @@ OUT: {
       totalSteps: 3, currentSteps: [], stepKeys: {} }
   ]
 }
-// All tasks start pending. stepKeys are EMPTY — use program start to activate.
+// 所有 Task 初始为 pending。stepKeys 为空 — 用 program start 激活获取密钥。
 ```
 
-### program start — Activate a node's tasks, get stepKeys
+### program start — 激活一个 Node 的 Task，获取 stepKeys
 
 ```
-IN:  program start '{"programId":"pgm_XXX","nodeId":"pgm_XXX_wave0"}'
+输入:  program start '{"programId":"pgm_XXX","nodeId":"pgm_XXX_wave0"}'
 
-OUT (success): {
+输出 (成功): {
   ok: true, nodeId: "pgm_XXX_wave0", sessionId: "ses_XXX",
   tasks: [
     { taskId: "pgm_XXX_wave0_T0", nodeId: "pgm_XXX_wave0",
@@ -339,32 +331,32 @@ OUT (success): {
   ]
 }
 
-OUT (blocked — node deps unsatisfied): {
+输出 (被拦截 — Node 依赖未满足): {
   ok: false, error: "NODE_NOT_READY",
   message: "Node has 1 unsatisfied dependencies",
   fix: "node dist/cli.js program status '{\"programId\":\"...\"}'"
 }
 ```
 
-### program status — Read program progress
+### program status — 查看 Program 进度
 
 ```
-IN:  program status '{"programId":"pgm_XXX"}'
+输入:  program status '{"programId":"pgm_XXX"}'
 
-OUT: {
+输出: {
   ok: true, programId: "pgm_XXX", title: "...",
   nodes: [ { nodeId, title, orderIndex, status } ]
 }
 ```
 
-### program rebuild — Rebuild after plan changes
+### program rebuild — 计划变更后重建
 
 ```
-IN:  program rebuild '{"programId":"pgm_XXX"}'          # dry-run
-     program rebuild '{"programId":"pgm_XXX"}' --confirm # execute
+输入:  program rebuild '{"programId":"pgm_XXX"}'          # 试运行
+      program rebuild '{"programId":"pgm_XXX"}' --confirm # 执行
 
-OUT (dry-run): { ok: true, dryRun: true, scope, completedSteps, pendingSteps, ... }
-OUT (confirm): { ok: true, confirmed: true, cancelledTasks: N, resetNodes: [...] }
+输出 (试运行): { ok: true, dryRun: true, scope, completedSteps, pendingSteps, ... }
+输出 (执行):   { ok: true, confirmed: true, cancelledTasks: N, resetNodes: [...] }
 ```
 
 ## DAG rules
